@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, User, TrendingUp, ChevronRight, RotateCcw, Save, ArrowLeft, Trash2, Wifi, WifiOff, RefreshCw, Settings, X, Users, Play, Check, Filter, Calendar } from 'lucide-react';
+import { Plus, User, TrendingUp, ChevronRight, RotateCcw, Save, ArrowLeft, Trash2, Wifi, WifiOff, RefreshCw, Settings, X, Users, Play, Check, Filter, Calendar, TrendingDown, Minus } from 'lucide-react';
 
 // ===========================================
 // CONFIGURATION
@@ -139,6 +139,19 @@ const setConfig = (config) => {
   supabase.url = config.url;
   supabase.key = config.key;
   supabase.updateHeaders();
+};
+
+// ===========================================
+// Helper Functions
+// ===========================================
+const formatDate = (dateStr) => {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+};
+
+const formatDateShort = (dateStr) => {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 };
 
 // ===========================================
@@ -299,7 +312,7 @@ const PlayerSelector = ({ players, selectedIds, onToggle }) => (
   </div>
 );
 
-// Session Player Tabs
+// Player Tabs during session
 const PlayerTabs = ({ players, activeId, onSelect, repsCount }) => (
   <div className="flex gap-2 overflow-x-auto pb-2">
     {players.map((player) => (
@@ -318,9 +331,80 @@ const PlayerTabs = ({ players, activeId, onSelect, repsCount }) => (
   </div>
 );
 
-// Analytics Filter
-const AnalyticsFilter = ({ filters, setFilters, pitchTypes }) => {
+// Trend Indicator Component
+const TrendIndicator = ({ current, previous, suffix = '%' }) => {
+  if (previous === null || previous === undefined || isNaN(previous)) {
+    return <span className="text-gray-500 text-xs">No prior data</span>;
+  }
+  
+  const diff = current - previous;
+  const diffRounded = Math.abs(diff).toFixed(1);
+  
+  if (Math.abs(diff) < 0.5) {
+    return (
+      <span className="text-gray-400 text-xs flex items-center gap-1">
+        <Minus size={12} /> No change
+      </span>
+    );
+  }
+  
+  if (diff > 0) {
+    return (
+      <span className="text-green-400 text-xs flex items-center gap-1">
+        <TrendingUp size={12} /> +{diffRounded}{suffix}
+      </span>
+    );
+  }
+  
+  return (
+    <span className="text-red-400 text-xs flex items-center gap-1">
+      <TrendingDown size={12} /> -{diffRounded}{suffix}
+    </span>
+  );
+};
+
+// Metric Card with Trends
+const MetricCard = ({ label, value, vsLast5, vsLastMonth }) => (
+  <div className="bg-gray-700 rounded-lg p-4">
+    <p className="text-gray-400 text-sm mb-1">{label}</p>
+    <p className="text-2xl font-bold mb-2">{value}%</p>
+    <div className="space-y-1">
+      <div className="flex justify-between items-center">
+        <span className="text-xs text-gray-500">vs Last 5 Sessions:</span>
+        <TrendIndicator current={parseFloat(value)} previous={vsLast5} />
+      </div>
+      <div className="flex justify-between items-center">
+        <span className="text-xs text-gray-500">vs Last Month:</span>
+        <TrendIndicator current={parseFloat(value)} previous={vsLastMonth} />
+      </div>
+    </div>
+  </div>
+);
+
+// Analytics Filter Component
+const AnalyticsFilter = ({ 
+  filters, 
+  setFilters, 
+  pitchTypes, 
+  sessions, 
+  sessionPlayers, 
+  selectedPlayerId,
+  players 
+}) => {
   const [showFilters, setShowFilters] = useState(false);
+  
+  // Get sessions for this player
+  const playerSessions = useMemo(() => {
+    if (!selectedPlayerId) return [];
+    const playerSessionIds = sessionPlayers
+      .filter(sp => sp.player_id === selectedPlayerId)
+      .map(sp => sp.session_id);
+    return sessions
+      .filter(s => playerSessionIds.includes(s.id))
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [selectedPlayerId, sessions, sessionPlayers]);
+
+  const hasActiveFilters = filters.pitchType || filters.dateRange !== 'all' || filters.sessionId || filters.startDate || filters.endDate;
   
   return (
     <div className="space-y-3">
@@ -330,13 +414,89 @@ const AnalyticsFilter = ({ filters, setFilters, pitchTypes }) => {
       >
         <Filter size={16} />
         Filters
-        {(filters.pitchType || filters.dateRange !== 'all') && (
+        {hasActiveFilters && (
           <span className="bg-blue-500 text-xs px-1.5 py-0.5 rounded">Active</span>
         )}
       </button>
       
       {showFilters && (
         <div className="bg-gray-800 rounded-lg p-4 space-y-4">
+          {/* Specific Session Filter */}
+          <div>
+            <label className="text-sm text-gray-400 block mb-2">Specific Session</label>
+            <select
+              value={filters.sessionId || ''}
+              onChange={(e) => setFilters({ 
+                ...filters, 
+                sessionId: e.target.value || null,
+                // Clear date filters when selecting a session
+                dateRange: e.target.value ? 'all' : filters.dateRange,
+                startDate: e.target.value ? null : filters.startDate,
+                endDate: e.target.value ? null : filters.endDate
+              })}
+              className="w-full px-3 py-2 bg-gray-700 rounded-lg text-white text-sm"
+            >
+              <option value="">All Sessions</option>
+              {playerSessions.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {formatDate(session.date)} - {getPitchTypeLabel(session.pitch_type)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Custom Date Range */}
+          <div>
+            <label className="text-sm text-gray-400 block mb-2">Custom Date Range</label>
+            <div className="flex gap-2">
+              <input
+                type="date"
+                value={filters.startDate || ''}
+                onChange={(e) => setFilters({ 
+                  ...filters, 
+                  startDate: e.target.value || null,
+                  sessionId: null,
+                  dateRange: 'custom'
+                })}
+                className="flex-1 px-3 py-2 bg-gray-700 rounded-lg text-white text-sm"
+              />
+              <span className="text-gray-500 self-center">to</span>
+              <input
+                type="date"
+                value={filters.endDate || ''}
+                onChange={(e) => setFilters({ 
+                  ...filters, 
+                  endDate: e.target.value || null,
+                  sessionId: null,
+                  dateRange: 'custom'
+                })}
+                className="flex-1 px-3 py-2 bg-gray-700 rounded-lg text-white text-sm"
+              />
+            </div>
+          </div>
+
+          {/* Quick Date Range */}
+          <div>
+            <label className="text-sm text-gray-400 block mb-2">Quick Range</label>
+            <select
+              value={filters.sessionId ? '' : filters.dateRange}
+              onChange={(e) => setFilters({ 
+                ...filters, 
+                dateRange: e.target.value,
+                sessionId: null,
+                startDate: null,
+                endDate: null
+              })}
+              className="w-full px-3 py-2 bg-gray-700 rounded-lg text-white"
+            >
+              <option value="all">All Time</option>
+              <option value="today">Today</option>
+              <option value="week">Last 7 Days</option>
+              <option value="month">Last 30 Days</option>
+            </select>
+          </div>
+
+          {/* Pitch Type Filter */}
           <div>
             <label className="text-sm text-gray-400 block mb-2">Pitch Type</label>
             <select
@@ -350,24 +510,12 @@ const AnalyticsFilter = ({ filters, setFilters, pitchTypes }) => {
               ))}
             </select>
           </div>
-          <div>
-            <label className="text-sm text-gray-400 block mb-2">Date Range</label>
-            <select
-              value={filters.dateRange}
-              onChange={(e) => setFilters({ ...filters, dateRange: e.target.value })}
-              className="w-full px-3 py-2 bg-gray-700 rounded-lg text-white"
-            >
-              <option value="all">All Time</option>
-              <option value="today">Today</option>
-              <option value="week">Last 7 Days</option>
-              <option value="month">Last 30 Days</option>
-            </select>
-          </div>
+
           <button
-            onClick={() => setFilters({ pitchType: null, dateRange: 'all' })}
+            onClick={() => setFilters({ pitchType: null, dateRange: 'all', sessionId: null, startDate: null, endDate: null })}
             className="text-sm text-blue-400 hover:text-blue-300"
           >
-            Clear Filters
+            Clear All Filters
           </button>
         </div>
       )}
@@ -383,7 +531,7 @@ const SessionRecap = ({ session, sessionPlayers, reps, players, onClose }) => {
       const playerReps = reps.filter(r => r.player_id === sp.player_id && r.session_id === session.id);
       
       if (playerReps.length === 0) {
-        return { player, reps: 0, hardHitRate: 0, contactRate: 0 };
+        return { player, reps: 0, hardHitRate: 0, contactRate: 0, lineDriveRate: 0, backspinRate: 0 };
       }
       
       const contactReps = playerReps.filter(r => r.launch_angle !== 'miss');
@@ -395,6 +543,9 @@ const SessionRecap = ({ session, sessionPlayers, reps, players, onClose }) => {
         contactRate: ((contactReps.length / playerReps.length) * 100).toFixed(0),
         lineDriveRate: contactReps.length > 0 
           ? ((contactReps.filter(r => r.launch_angle === 'line').length / contactReps.length) * 100).toFixed(0)
+          : 0,
+        backspinRate: contactReps.length > 0
+          ? ((contactReps.filter(r => r.spin === 'back').length / contactReps.length) * 100).toFixed(0)
           : 0
       };
     });
@@ -414,10 +565,10 @@ const SessionRecap = ({ session, sessionPlayers, reps, players, onClose }) => {
         </div>
         
         <div className="grid gap-4">
-          {playerStats.map(({ player, reps, hardHitRate, contactRate, lineDriveRate }) => (
+          {playerStats.map(({ player, reps, hardHitRate, contactRate, lineDriveRate, backspinRate }) => (
             <div key={player?.id || 'unknown'} className="bg-gray-700 rounded-lg p-4">
               <h3 className="font-medium mb-3">{player?.name || 'Unknown'}</h3>
-              <div className="grid grid-cols-4 gap-4 text-center">
+              <div className="grid grid-cols-5 gap-3 text-center">
                 <div>
                   <p className="text-2xl font-bold">{reps}</p>
                   <p className="text-xs text-gray-400">Reps</p>
@@ -433,6 +584,10 @@ const SessionRecap = ({ session, sessionPlayers, reps, players, onClose }) => {
                 <div>
                   <p className="text-2xl font-bold text-purple-400">{lineDriveRate}%</p>
                   <p className="text-xs text-gray-400">Line Drive</p>
+                </div>
+                <div>
+                  <p className="text-2xl font-bold text-yellow-400">{backspinRate}%</p>
+                  <p className="text-xs text-gray-400">Backspin</p>
                 </div>
               </div>
             </div>
@@ -469,7 +624,7 @@ export default function HittingTrackerV2() {
   const [reps, setReps] = useState([]);
 
   // UI state
-  const [view, setView] = useState('home'); // home, setup, session, recap, analytics, players
+  const [view, setView] = useState('home');
   const [newPlayerName, setNewPlayerName] = useState('');
   const [showAddPlayer, setShowAddPlayer] = useState(false);
 
@@ -491,7 +646,13 @@ export default function HittingTrackerV2() {
 
   // Analytics state
   const [selectedPlayerId, setSelectedPlayerId] = useState(null);
-  const [analyticsFilters, setAnalyticsFilters] = useState({ pitchType: null, dateRange: 'all' });
+  const [analyticsFilters, setAnalyticsFilters] = useState({ 
+    pitchType: null, 
+    dateRange: 'all', 
+    sessionId: null,
+    startDate: null,
+    endDate: null
+  });
 
   // Session recap state
   const [showRecap, setShowRecap] = useState(false);
@@ -739,7 +900,6 @@ export default function HittingTrackerV2() {
       reps: sessionReps
     };
 
-    // Create temp session for display
     const tempSession = {
       id: currentSession.id,
       pitch_type: selectedPitchType,
@@ -766,17 +926,14 @@ export default function HittingTrackerV2() {
       created_at: new Date().toISOString()
     }));
 
-    // Update local state
     setSessions([tempSession, ...sessions]);
     setSessionPlayers([...sessionPlayers, ...tempSessionPlayers]);
     setReps([...reps, ...tempReps]);
 
-    // Show recap
     setRecapSession(tempSession);
     setShowRecap(true);
     setView('home');
 
-    // Sync to server
     if (isOnline) {
       try {
         const [session] = await supabase.createSession(selectedPitchType);
@@ -826,11 +983,34 @@ export default function HittingTrackerV2() {
   const getFilteredReps = (playerId) => {
     let filtered = reps.filter(r => r.player_id === playerId);
     
+    // Filter by specific session
+    if (analyticsFilters.sessionId) {
+      filtered = filtered.filter(r => r.session_id === analyticsFilters.sessionId);
+      return filtered;
+    }
+    
+    // Filter by pitch type
     if (analyticsFilters.pitchType) {
       filtered = filtered.filter(r => r.pitch_type === analyticsFilters.pitchType);
     }
     
-    if (analyticsFilters.dateRange !== 'all') {
+    // Filter by custom date range
+    if (analyticsFilters.startDate || analyticsFilters.endDate) {
+      if (analyticsFilters.startDate) {
+        const start = new Date(analyticsFilters.startDate);
+        start.setHours(0, 0, 0, 0);
+        filtered = filtered.filter(r => new Date(r.created_at) >= start);
+      }
+      if (analyticsFilters.endDate) {
+        const end = new Date(analyticsFilters.endDate);
+        end.setHours(23, 59, 59, 999);
+        filtered = filtered.filter(r => new Date(r.created_at) <= end);
+      }
+      return filtered;
+    }
+    
+    // Filter by quick date range
+    if (analyticsFilters.dateRange !== 'all' && analyticsFilters.dateRange !== 'custom') {
       const now = new Date();
       let cutoff;
       switch (analyticsFilters.dateRange) {
@@ -852,11 +1032,74 @@ export default function HittingTrackerV2() {
     return filtered;
   };
 
+  // Get stats for a specific set of reps
+  const calculateStats = (repsData) => {
+    if (!repsData || repsData.length === 0) return null;
+    
+    const contactReps = repsData.filter(r => r.launch_angle !== 'miss');
+    
+    return {
+      hardHitRate: (repsData.filter(r => r.hard_hit === 'yes').length / repsData.length) * 100,
+      lineDriveRate: contactReps.length > 0 
+        ? (contactReps.filter(r => r.launch_angle === 'line').length / contactReps.length) * 100
+        : 0,
+      backspinRate: contactReps.length > 0
+        ? (contactReps.filter(r => r.spin === 'back').length / contactReps.length) * 100
+        : 0
+    };
+  };
+
+  // Get last 5 sessions stats for a player
+  const getLast5SessionsStats = (playerId) => {
+    const playerSessionIds = sessionPlayers
+      .filter(sp => sp.player_id === playerId)
+      .map(sp => sp.session_id);
+    
+    const playerSessions = sessions
+      .filter(s => playerSessionIds.includes(s.id))
+      .sort((a, b) => new Date(b.date) - new Date(a.date))
+      .slice(0, 5);
+    
+    if (playerSessions.length === 0) return null;
+    
+    const sessionRepsData = reps.filter(r => 
+      r.player_id === playerId && 
+      playerSessions.map(s => s.id).includes(r.session_id)
+    );
+    
+    return calculateStats(sessionRepsData);
+  };
+
+  // Get last month stats for a player
+  const getLastMonthStats = (playerId) => {
+    const oneMonthAgo = new Date();
+    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+    
+    const monthReps = reps.filter(r => 
+      r.player_id === playerId && 
+      new Date(r.created_at) >= oneMonthAgo
+    );
+    
+    return calculateStats(monthReps);
+  };
+
   const getPlayerStats = (playerId) => {
     const playerReps = getFilteredReps(playerId);
     if (playerReps.length === 0) return null;
 
     const contactReps = playerReps.filter(r => r.launch_angle !== 'miss');
+    
+    // Current filtered stats
+    const currentStats = calculateStats(playerReps);
+    
+    // Comparison stats (only if not filtering by specific session)
+    let last5Stats = null;
+    let lastMonthStats = null;
+    
+    if (!analyticsFilters.sessionId) {
+      last5Stats = getLast5SessionsStats(playerId);
+      lastMonthStats = getLastMonthStats(playerId);
+    }
     
     // Zone stats for heat map
     const zones = {};
@@ -872,8 +1115,21 @@ export default function HittingTrackerV2() {
 
     return {
       totalReps: playerReps.length,
-      hardHitRate: ((playerReps.filter(r => r.hard_hit === 'yes').length / playerReps.length) * 100).toFixed(1),
+      hardHitRate: currentStats.hardHitRate.toFixed(1),
+      lineDriveRate: currentStats.lineDriveRate.toFixed(1),
+      backspinRate: currentStats.backspinRate.toFixed(1),
       contactRate: ((contactReps.length / playerReps.length) * 100).toFixed(1),
+      // Comparison data
+      last5: last5Stats ? {
+        hardHitRate: last5Stats.hardHitRate,
+        lineDriveRate: last5Stats.lineDriveRate,
+        backspinRate: last5Stats.backspinRate
+      } : null,
+      lastMonth: lastMonthStats ? {
+        hardHitRate: lastMonthStats.hardHitRate,
+        lineDriveRate: lastMonthStats.lineDriveRate,
+        backspinRate: lastMonthStats.backspinRate
+      } : null,
       launchAngle: {
         flyBall: ((playerReps.filter(r => r.launch_angle === 'fly').length / playerReps.length) * 100).toFixed(1),
         lineDrive: ((playerReps.filter(r => r.launch_angle === 'line').length / playerReps.length) * 100).toFixed(1),
@@ -976,7 +1232,7 @@ export default function HittingTrackerV2() {
                 {sessions.slice(0, 5).map((session) => {
                   const sp = sessionPlayers.filter(s => s.session_id === session.id);
                   const sessionPlayerNames = sp.map(s => players.find(p => p.id === s.player_id)?.name).filter(Boolean);
-                  const sessionReps = reps.filter(r => r.session_id === session.id);
+                  const sessionRepsCount = reps.filter(r => r.session_id === session.id).length;
                   
                   return (
                     <div key={session.id} className="bg-gray-800 rounded-lg p-3">
@@ -984,11 +1240,11 @@ export default function HittingTrackerV2() {
                         <div>
                           <p className="font-medium">{getPitchTypeLabel(session.pitch_type)}</p>
                           <p className="text-sm text-gray-400">
-                            {sessionPlayerNames.join(', ')} · {sessionReps.length} reps
+                            {sessionPlayerNames.join(', ')} · {sessionRepsCount} reps
                           </p>
                         </div>
                         <p className="text-xs text-gray-500">
-                          {new Date(session.date).toLocaleDateString()}
+                          {formatDateShort(session.date)}
                         </p>
                       </div>
                     </div>
@@ -1248,17 +1504,23 @@ export default function HittingTrackerV2() {
             {currentPlayerReps.length > 0 && (
               <div className="bg-gray-800 rounded-xl p-4">
                 <h3 className="font-medium mb-2">{players.find(p => p.id === activePlayerId)?.name} - This Session</h3>
-                <div className="grid grid-cols-2 gap-4 text-sm">
+                <div className="grid grid-cols-3 gap-4 text-sm">
                   <div>
-                    <p className="text-gray-400">Hard Hit Rate</p>
+                    <p className="text-gray-400">Hard Hit</p>
                     <p className="text-xl font-bold">
                       {((currentPlayerReps.filter(r => r.hardHit === 'yes').length / currentPlayerReps.length) * 100).toFixed(0)}%
                     </p>
                   </div>
                   <div>
-                    <p className="text-gray-400">Contact Rate</p>
+                    <p className="text-gray-400">Line Drive</p>
                     <p className="text-xl font-bold">
-                      {((currentPlayerReps.filter(r => r.launchAngle !== 'miss').length / currentPlayerReps.length) * 100).toFixed(0)}%
+                      {((currentPlayerReps.filter(r => r.launchAngle === 'line').length / currentPlayerReps.filter(r => r.launchAngle !== 'miss').length) * 100 || 0).toFixed(0)}%
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-400">Backspin</p>
+                    <p className="text-xl font-bold">
+                      {((currentPlayerReps.filter(r => r.spin === 'back').length / currentPlayerReps.filter(r => r.launchAngle !== 'miss').length) * 100 || 0).toFixed(0)}%
                     </p>
                   </div>
                 </div>
@@ -1287,7 +1549,11 @@ export default function HittingTrackerV2() {
           <div className="space-y-4">
             <select
               value={selectedPlayerId || ''}
-              onChange={(e) => setSelectedPlayerId(e.target.value || null)}
+              onChange={(e) => {
+                setSelectedPlayerId(e.target.value || null);
+                // Reset filters when changing player
+                setAnalyticsFilters({ pitchType: null, dateRange: 'all', sessionId: null, startDate: null, endDate: null });
+              }}
               className="w-full px-4 py-3 bg-gray-800 rounded-lg text-white"
             >
               <option value="">Select a player</option>
@@ -1301,29 +1567,44 @@ export default function HittingTrackerV2() {
                 filters={analyticsFilters}
                 setFilters={setAnalyticsFilters}
                 pitchTypes={PITCH_TYPES}
+                sessions={sessions}
+                sessionPlayers={sessionPlayers}
+                selectedPlayerId={selectedPlayerId}
+                players={players}
               />
             )}
 
             {stats ? (
               <div className="space-y-4">
+                {/* Key Metrics with Trends */}
                 <div className="bg-gray-800 rounded-xl p-4">
-                  <h3 className="font-medium mb-3">Overview</h3>
-                  <div className="grid grid-cols-3 gap-4">
-                    <div className="text-center">
-                      <p className="text-2xl font-bold">{stats.totalReps}</p>
-                      <p className="text-xs text-gray-400">Reps</p>
-                    </div>
-                    <div className="text-center">
-                      <p className="text-2xl font-bold text-green-400">{stats.hardHitRate}%</p>
-                      <p className="text-xs text-gray-400">Hard Hit</p>
-                    </div>
-                    <div className="text-center">
-                      <p className="text-2xl font-bold text-blue-400">{stats.contactRate}%</p>
-                      <p className="text-xs text-gray-400">Contact</p>
-                    </div>
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="font-medium">Key Metrics</h3>
+                    <span className="text-xs text-gray-500">{stats.totalReps} reps</span>
+                  </div>
+                  <div className="grid gap-3">
+                    <MetricCard 
+                      label="Hard Hit %" 
+                      value={stats.hardHitRate}
+                      vsLast5={stats.last5?.hardHitRate}
+                      vsLastMonth={stats.lastMonth?.hardHitRate}
+                    />
+                    <MetricCard 
+                      label="Line Drive %" 
+                      value={stats.lineDriveRate}
+                      vsLast5={stats.last5?.lineDriveRate}
+                      vsLastMonth={stats.lastMonth?.lineDriveRate}
+                    />
+                    <MetricCard 
+                      label="Backspin %" 
+                      value={stats.backspinRate}
+                      vsLast5={stats.last5?.backspinRate}
+                      vsLastMonth={stats.lastMonth?.backspinRate}
+                    />
                   </div>
                 </div>
 
+                {/* Heat Map */}
                 <div className="bg-gray-800 rounded-xl p-4">
                   <h3 className="font-medium mb-3">Hard Hit % by Zone</h3>
                   <StrikeZone heatMapData={stats.zones} />
@@ -1335,6 +1616,7 @@ export default function HittingTrackerV2() {
                   </div>
                 </div>
 
+                {/* Launch Angle Distribution */}
                 <div className="bg-gray-800 rounded-xl p-4">
                   <h3 className="font-medium mb-3">Launch Angle</h3>
                   <div className="space-y-2">
@@ -1355,6 +1637,7 @@ export default function HittingTrackerV2() {
                   </div>
                 </div>
 
+                {/* Direction */}
                 <div className="bg-gray-800 rounded-xl p-4">
                   <h3 className="font-medium mb-3">Direction (on contact)</h3>
                   <div className="grid grid-cols-3 gap-4 text-center">
@@ -1375,7 +1658,7 @@ export default function HittingTrackerV2() {
               </div>
             ) : (
               <div className="bg-gray-800 rounded-xl p-8 text-center text-gray-500">
-                Select a player to view their stats
+                {selectedPlayerId ? 'No data for selected filters' : 'Select a player to view their stats'}
               </div>
             )}
           </div>
