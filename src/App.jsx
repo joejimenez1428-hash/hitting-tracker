@@ -1,11 +1,26 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Plus, User, TrendingUp, ChevronRight, RotateCcw, Save, ArrowLeft, Trash2, Wifi, WifiOff, RefreshCw, Settings, X } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Plus, User, TrendingUp, ChevronRight, RotateCcw, Save, ArrowLeft, Trash2, Wifi, WifiOff, RefreshCw, Settings, X, Users, Play, Check, Filter, Calendar } from 'lucide-react';
 
 // ===========================================
-// CONFIGURATION - You'll update these values
+// CONFIGURATION
 // ===========================================
-const SUPABASE_URL = 'YOUR_SUPABASE_URL';
-const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+const DEFAULT_CONFIG = {
+  url: 'YOUR_SUPABASE_URL',
+  key: 'YOUR_SUPABASE_ANON_KEY'
+};
+
+// Pitch type options
+const PITCH_TYPES = [
+  { value: 'righty_fb', label: 'Righty FB' },
+  { value: 'lefty_fb', label: 'Lefty FB' },
+  { value: 'righty_cb', label: 'Righty Slow CB' },
+  { value: 'lefty_cb', label: 'Lefty Slow CB' }
+];
+
+const getPitchTypeLabel = (value) => {
+  const pt = PITCH_TYPES.find(p => p.value === value);
+  return pt ? pt.label : value;
+};
 
 // ===========================================
 // Supabase Client
@@ -14,27 +29,23 @@ class SupabaseClient {
   constructor(url, key) {
     this.url = url;
     this.key = key;
+    this.updateHeaders();
+  }
+
+  updateHeaders() {
     this.headers = {
-      'apikey': key,
-      'Authorization': `Bearer ${key}`,
+      'apikey': this.key,
+      'Authorization': `Bearer ${this.key}`,
       'Content-Type': 'application/json',
       'Prefer': 'return=representation'
     };
   }
 
   async query(table, method = 'GET', body = null, queryParams = '') {
-    const options = {
-      method,
-      headers: this.headers,
-    };
-    if (body) {
-      options.body = JSON.stringify(body);
-    }
+    const options = { method, headers: this.headers };
+    if (body) options.body = JSON.stringify(body);
     
-    const response = await fetch(
-      `${this.url}/rest/v1/${table}${queryParams}`,
-      options
-    );
+    const response = await fetch(`${this.url}/rest/v1/${table}${queryParams}`, options);
     
     if (!response.ok) {
       const error = await response.text();
@@ -45,7 +56,6 @@ class SupabaseClient {
     return response.json();
   }
 
-  // Players
   async getPlayers() {
     return this.query('players', 'GET', null, '?order=name.asc');
   }
@@ -58,16 +68,22 @@ class SupabaseClient {
     return this.query('players', 'DELETE', null, `?id=eq.${id}`);
   }
 
-  // Sessions
   async getSessions() {
     return this.query('sessions', 'GET', null, '?order=date.desc');
   }
 
-  async createSession(playerId) {
-    return this.query('sessions', 'POST', { player_id: playerId });
+  async createSession(pitchType) {
+    return this.query('sessions', 'POST', { pitch_type: pitchType });
   }
 
-  // Reps
+  async getSessionPlayers() {
+    return this.query('session_players', 'GET', null, '?order=created_at.asc');
+  }
+
+  async addSessionPlayer(sessionId, playerId) {
+    return this.query('session_players', 'POST', { session_id: sessionId, player_id: playerId });
+  }
+
   async getReps() {
     return this.query('reps', 'GET', null, '?order=created_at.asc');
   }
@@ -77,25 +93,24 @@ class SupabaseClient {
   }
 }
 
-const supabase = new SupabaseClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabase = new SupabaseClient(DEFAULT_CONFIG.url, DEFAULT_CONFIG.key);
 
 // ===========================================
-// Local Storage for Offline Queue
+// Local Storage Helpers
 // ===========================================
 const OFFLINE_QUEUE_KEY = 'hitting_tracker_offline_queue';
 const LOCAL_CACHE_KEY = 'hitting_tracker_cache';
+const CONFIG_KEY = 'hitting_tracker_config';
 
 const getOfflineQueue = () => {
   try {
     return JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]');
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 };
 
 const addToOfflineQueue = (action) => {
   const queue = getOfflineQueue();
-  queue.push({ ...action, timestamp: Date.now() });
+  queue.push({ ...action, timestamp: Date.now(), id: `offline_${Date.now()}_${Math.random()}` });
   localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
 };
 
@@ -106,13 +121,24 @@ const clearOfflineQueue = () => {
 const getLocalCache = () => {
   try {
     return JSON.parse(localStorage.getItem(LOCAL_CACHE_KEY) || '{}');
-  } catch {
-    return {};
-  }
+  } catch { return {}; }
 };
 
 const setLocalCache = (data) => {
-  localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(data));
+  localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify({ ...data, lastUpdated: Date.now() }));
+};
+
+const getConfig = () => {
+  try {
+    return JSON.parse(localStorage.getItem(CONFIG_KEY)) || DEFAULT_CONFIG;
+  } catch { return DEFAULT_CONFIG; }
+};
+
+const setConfig = (config) => {
+  localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+  supabase.url = config.url;
+  supabase.key = config.key;
+  supabase.updateHeaders();
 };
 
 // ===========================================
@@ -120,95 +146,96 @@ const setLocalCache = (data) => {
 // ===========================================
 
 // Strike Zone Component
-const StrikeZone = ({ selected, onSelect }) => {
-  const zones = [
-    [1, 2, 3],
-    [4, 5, 6],
-    [7, 8, 9]
-  ];
+const StrikeZone = ({ selected, onSelect, heatMapData = null }) => {
+  const zones = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
   
-  const getZoneLabel = (zone) => {
-    const labels = {
-      1: 'Up & In', 2: 'Up Middle', 3: 'Up & Away',
-      4: 'Middle In', 5: 'Heart', 6: 'Middle Away',
-      7: 'Down & In', 8: 'Down Middle', 9: 'Down & Away'
-    };
-    return labels[zone];
+  const getZoneColor = (zone) => {
+    if (!heatMapData) return null;
+    const data = heatMapData[zone];
+    if (!data || data.total === 0) return 'bg-gray-700';
+    
+    const rate = parseFloat(data.hardHitRate);
+    if (rate >= 50) return 'bg-green-600';
+    if (rate >= 35) return 'bg-yellow-600';
+    if (rate >= 20) return 'bg-orange-600';
+    return 'bg-red-600';
   };
 
   return (
     <div className="flex flex-col items-center">
       <div className="grid grid-cols-3 gap-1 bg-gray-800 p-2 rounded-lg">
-        {zones.map((row, rowIdx) => (
-          row.map((zone) => (
+        {zones.flat().map((zone) => {
+          const heatColor = getZoneColor(zone);
+          return (
             <button
               key={zone}
-              onClick={() => onSelect(zone)}
-              className={`w-16 h-16 sm:w-20 sm:h-20 rounded flex items-center justify-center text-sm font-medium transition-all active:scale-95
+              onClick={() => onSelect && onSelect(zone)}
+              className={`w-16 h-16 sm:w-20 sm:h-20 rounded flex flex-col items-center justify-center text-sm font-medium transition-all active:scale-95
                 ${selected === zone 
                   ? 'bg-blue-500 text-white ring-2 ring-blue-300' 
-                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600 active:bg-gray-500'}`}
+                  : heatColor || 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
             >
-              {zone}
+              <span>{zone}</span>
+              {heatMapData && heatMapData[zone] && heatMapData[zone].total > 0 && (
+                <span className="text-xs opacity-80">{heatMapData[zone].hardHitRate}%</span>
+              )}
             </button>
-          ))
-        ))}
-      </div>
-      {selected && (
-        <p className="mt-2 text-sm text-gray-400">{getZoneLabel(selected)}</p>
-      )}
-    </div>
-  );
-};
-
-// Toggle Button Group Component
-const ToggleGroup = ({ label, options, selected, onSelect, columns = 2 }) => {
-  return (
-    <div className="space-y-2">
-      <label className="text-sm font-medium text-gray-300">{label}</label>
-      <div className={`grid gap-2 ${columns === 2 ? 'grid-cols-2' : columns === 3 ? 'grid-cols-3' : 'grid-cols-4'}`}>
-        {options.map((option) => (
-          <button
-            key={option.value}
-            onClick={() => onSelect(option.value)}
-            className={`px-3 py-3 rounded-lg text-sm font-medium transition-all active:scale-95
-              ${selected === option.value
-                ? 'bg-blue-500 text-white'
-                : 'bg-gray-700 text-gray-300 hover:bg-gray-600 active:bg-gray-500'}`}
-          >
-            {option.label}
-          </button>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 };
 
-// Connection Status Badge
-const ConnectionStatus = ({ isOnline, pendingCount, onSync }) => {
-  return (
-    <div className="flex items-center gap-2">
-      {pendingCount > 0 && (
+// Toggle Button Group
+const ToggleGroup = ({ label, options, selected, onSelect, columns = 2 }) => (
+  <div className="space-y-2">
+    <label className="text-sm font-medium text-gray-300">{label}</label>
+    <div className={`grid gap-2 grid-cols-${columns}`} style={{ gridTemplateColumns: `repeat(${columns}, 1fr)` }}>
+      {options.map((option) => (
         <button
-          onClick={onSync}
-          className="flex items-center gap-1 px-2 py-1 bg-yellow-600 rounded text-xs"
+          key={option.value}
+          onClick={() => onSelect(option.value)}
+          className={`px-3 py-3 rounded-lg text-sm font-medium transition-all active:scale-95
+            ${selected === option.value
+              ? 'bg-blue-500 text-white'
+              : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
         >
-          <RefreshCw size={12} />
-          {pendingCount} pending
+          {option.label}
         </button>
-      )}
-      <div className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${isOnline ? 'bg-green-800 text-green-200' : 'bg-red-800 text-red-200'}`}>
-        {isOnline ? <Wifi size={12} /> : <WifiOff size={12} />}
-        {isOnline ? 'Online' : 'Offline'}
-      </div>
+      ))}
     </div>
-  );
-};
+  </div>
+);
+
+// Connection Status
+const ConnectionStatus = ({ isOnline, pendingCount, onSync }) => (
+  <div className="flex items-center gap-2">
+    {pendingCount > 0 && (
+      <button onClick={onSync} className="flex items-center gap-1 px-2 py-1 bg-yellow-600 rounded text-xs">
+        <RefreshCw size={12} />
+        {pendingCount} pending
+      </button>
+    )}
+    <div className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${isOnline ? 'bg-green-800 text-green-200' : 'bg-red-800 text-red-200'}`}>
+      {isOnline ? <Wifi size={12} /> : <WifiOff size={12} />}
+      {isOnline ? 'Online' : 'Offline'}
+    </div>
+  </div>
+);
 
 // Settings Modal
-const SettingsModal = ({ isOpen, onClose, supabaseUrl, supabaseKey, onSave }) => {
-  const [url, setUrl] = useState(supabaseUrl);
-  const [key, setKey] = useState(supabaseKey);
+const SettingsModal = ({ isOpen, onClose, onSave }) => {
+  const [url, setUrl] = useState('');
+  const [key, setKey] = useState('');
+
+  useEffect(() => {
+    if (isOpen) {
+      const config = getConfig();
+      setUrl(config.url);
+      setKey(config.key);
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -217,9 +244,7 @@ const SettingsModal = ({ isOpen, onClose, supabaseUrl, supabaseKey, onSave }) =>
       <div className="bg-gray-800 rounded-xl p-6 w-full max-w-md">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-lg font-bold">Supabase Settings</h2>
-          <button onClick={onClose} className="p-1 hover:bg-gray-700 rounded">
-            <X size={20} />
-          </button>
+          <button onClick={onClose} className="p-1 hover:bg-gray-700 rounded"><X size={20} /></button>
         </div>
         <div className="space-y-4">
           <div>
@@ -243,10 +268,7 @@ const SettingsModal = ({ isOpen, onClose, supabaseUrl, supabaseKey, onSave }) =>
             />
           </div>
           <button
-            onClick={() => {
-              onSave(url, key);
-              onClose();
-            }}
+            onClick={() => { onSave(url, key); onClose(); }}
             className="w-full py-3 bg-blue-500 rounded-lg font-medium hover:bg-blue-600"
           >
             Save & Connect
@@ -257,44 +279,208 @@ const SettingsModal = ({ isOpen, onClose, supabaseUrl, supabaseKey, onSave }) =>
   );
 };
 
-// ===========================================
-// Main App Component
-// ===========================================
-export default function HittingTrackerCloud() {
-  // Config state
-  const [config, setConfig] = useState(() => {
-    const saved = localStorage.getItem('hitting_tracker_config');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      supabase.url = parsed.url;
-      supabase.key = parsed.key;
-      supabase.headers = {
-        'apikey': parsed.key,
-        'Authorization': `Bearer ${parsed.key}`,
-        'Content-Type': 'application/json',
-        'Prefer': 'return=representation'
-      };
-      return parsed;
-    }
-    return { url: SUPABASE_URL, key: SUPABASE_ANON_KEY };
-  });
-  const [showSettings, setShowSettings] = useState(false);
+// Player Selection for Session
+const PlayerSelector = ({ players, selectedIds, onToggle }) => (
+  <div className="space-y-2">
+    {players.map((player) => (
+      <button
+        key={player.id}
+        onClick={() => onToggle(player.id)}
+        className={`w-full p-3 rounded-lg flex items-center gap-3 transition-all
+          ${selectedIds.includes(player.id) ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}
+      >
+        <div className={`w-6 h-6 rounded border-2 flex items-center justify-center
+          ${selectedIds.includes(player.id) ? 'border-white bg-white' : 'border-gray-500'}`}>
+          {selectedIds.includes(player.id) && <Check size={16} className="text-blue-600" />}
+        </div>
+        <span>{player.name}</span>
+      </button>
+    ))}
+  </div>
+);
 
-  // App state
-  const [view, setView] = useState('players');
-  const [players, setPlayers] = useState([]);
-  const [sessions, setSessions] = useState([]);
-  const [reps, setReps] = useState([]);
-  const [currentPlayer, setCurrentPlayer] = useState(null);
-  const [newPlayerName, setNewPlayerName] = useState('');
-  const [showAddPlayer, setShowAddPlayer] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+// Session Player Tabs
+const PlayerTabs = ({ players, activeId, onSelect, repsCount }) => (
+  <div className="flex gap-2 overflow-x-auto pb-2">
+    {players.map((player) => (
+      <button
+        key={player.id}
+        onClick={() => onSelect(player.id)}
+        className={`px-4 py-2 rounded-lg whitespace-nowrap flex items-center gap-2 transition-all
+          ${activeId === player.id ? 'bg-blue-500 text-white' : 'bg-gray-700 text-gray-300'}`}
+      >
+        <span>{player.name}</span>
+        <span className={`text-xs px-1.5 py-0.5 rounded ${activeId === player.id ? 'bg-blue-400' : 'bg-gray-600'}`}>
+          {repsCount[player.id] || 0}
+        </span>
+      </button>
+    ))}
+  </div>
+);
+
+// Analytics Filter
+const AnalyticsFilter = ({ filters, setFilters, pitchTypes }) => {
+  const [showFilters, setShowFilters] = useState(false);
+  
+  return (
+    <div className="space-y-3">
+      <button
+        onClick={() => setShowFilters(!showFilters)}
+        className="flex items-center gap-2 px-3 py-2 bg-gray-700 rounded-lg text-sm"
+      >
+        <Filter size={16} />
+        Filters
+        {(filters.pitchType || filters.dateRange !== 'all') && (
+          <span className="bg-blue-500 text-xs px-1.5 py-0.5 rounded">Active</span>
+        )}
+      </button>
+      
+      {showFilters && (
+        <div className="bg-gray-800 rounded-lg p-4 space-y-4">
+          <div>
+            <label className="text-sm text-gray-400 block mb-2">Pitch Type</label>
+            <select
+              value={filters.pitchType || ''}
+              onChange={(e) => setFilters({ ...filters, pitchType: e.target.value || null })}
+              className="w-full px-3 py-2 bg-gray-700 rounded-lg text-white"
+            >
+              <option value="">All Pitch Types</option>
+              {pitchTypes.map((pt) => (
+                <option key={pt.value} value={pt.value}>{pt.label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-sm text-gray-400 block mb-2">Date Range</label>
+            <select
+              value={filters.dateRange}
+              onChange={(e) => setFilters({ ...filters, dateRange: e.target.value })}
+              className="w-full px-3 py-2 bg-gray-700 rounded-lg text-white"
+            >
+              <option value="all">All Time</option>
+              <option value="today">Today</option>
+              <option value="week">Last 7 Days</option>
+              <option value="month">Last 30 Days</option>
+            </select>
+          </div>
+          <button
+            onClick={() => setFilters({ pitchType: null, dateRange: 'all' })}
+            className="text-sm text-blue-400 hover:text-blue-300"
+          >
+            Clear Filters
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Session Recap Component
+const SessionRecap = ({ session, sessionPlayers, reps, players, onClose }) => {
+  const playerStats = useMemo(() => {
+    return sessionPlayers.map((sp) => {
+      const player = players.find(p => p.id === sp.player_id);
+      const playerReps = reps.filter(r => r.player_id === sp.player_id && r.session_id === session.id);
+      
+      if (playerReps.length === 0) {
+        return { player, reps: 0, hardHitRate: 0, contactRate: 0 };
+      }
+      
+      const contactReps = playerReps.filter(r => r.launch_angle !== 'miss');
+      
+      return {
+        player,
+        reps: playerReps.length,
+        hardHitRate: ((playerReps.filter(r => r.hard_hit === 'yes').length / playerReps.length) * 100).toFixed(0),
+        contactRate: ((contactReps.length / playerReps.length) * 100).toFixed(0),
+        lineDriveRate: contactReps.length > 0 
+          ? ((contactReps.filter(r => r.launch_angle === 'line').length / contactReps.length) * 100).toFixed(0)
+          : 0
+      };
+    });
+  }, [session, sessionPlayers, reps, players]);
+
+  return (
+    <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-50">
+      <div className="bg-gray-800 rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <h2 className="text-xl font-bold">Session Recap</h2>
+            <p className="text-gray-400 text-sm">{getPitchTypeLabel(session.pitch_type)}</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-gray-700 rounded-lg">
+            <X size={24} />
+          </button>
+        </div>
+        
+        <div className="grid gap-4">
+          {playerStats.map(({ player, reps, hardHitRate, contactRate, lineDriveRate }) => (
+            <div key={player?.id || 'unknown'} className="bg-gray-700 rounded-lg p-4">
+              <h3 className="font-medium mb-3">{player?.name || 'Unknown'}</h3>
+              <div className="grid grid-cols-4 gap-4 text-center">
+                <div>
+                  <p className="text-2xl font-bold">{reps}</p>
+                  <p className="text-xs text-gray-400">Reps</p>
+                </div>
+                <div>
+                  <p className="text-2xl font-bold text-green-400">{hardHitRate}%</p>
+                  <p className="text-xs text-gray-400">Hard Hit</p>
+                </div>
+                <div>
+                  <p className="text-2xl font-bold text-blue-400">{contactRate}%</p>
+                  <p className="text-xs text-gray-400">Contact</p>
+                </div>
+                <div>
+                  <p className="text-2xl font-bold text-purple-400">{lineDriveRate}%</p>
+                  <p className="text-xs text-gray-400">Line Drive</p>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        
+        <button
+          onClick={onClose}
+          className="w-full mt-6 py-3 bg-blue-500 rounded-lg font-medium hover:bg-blue-600"
+        >
+          Done
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ===========================================
+// Main App
+// ===========================================
+export default function HittingTrackerV2() {
+  // Config & connection state
+  const [config, setConfigState] = useState(getConfig);
+  const [showSettings, setShowSettings] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [pendingActions, setPendingActions] = useState([]);
-  const [lastSync, setLastSync] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Current rep state
+  // Data state
+  const [players, setPlayers] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [sessionPlayers, setSessionPlayers] = useState([]);
+  const [reps, setReps] = useState([]);
+
+  // UI state
+  const [view, setView] = useState('home'); // home, setup, session, recap, analytics, players
+  const [newPlayerName, setNewPlayerName] = useState('');
+  const [showAddPlayer, setShowAddPlayer] = useState(false);
+
+  // Session setup state
+  const [selectedPlayerIds, setSelectedPlayerIds] = useState([]);
+  const [selectedPitchType, setSelectedPitchType] = useState(null);
+
+  // Active session state
+  const [currentSession, setCurrentSession] = useState(null);
+  const [activePlayerId, setActivePlayerId] = useState(null);
+  const [sessionReps, setSessionReps] = useState([]);
   const [currentRep, setCurrentRep] = useState({
     pitchLocation: null,
     hardHit: null,
@@ -302,27 +488,28 @@ export default function HittingTrackerCloud() {
     direction: null,
     spin: null
   });
-  const [sessionReps, setSessionReps] = useState([]);
-  const [repCount, setRepCount] = useState(1);
 
   // Analytics state
   const [selectedPlayerId, setSelectedPlayerId] = useState(null);
+  const [analyticsFilters, setAnalyticsFilters] = useState({ pitchType: null, dateRange: 'all' });
+
+  // Session recap state
+  const [showRecap, setShowRecap] = useState(false);
+  const [recapSession, setRecapSession] = useState(null);
 
   // Online/offline detection
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
-    
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
-    
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
 
-  // Load pending actions from queue
+  // Load pending actions
   useEffect(() => {
     setPendingActions(getOfflineQueue());
   }, []);
@@ -341,16 +528,8 @@ export default function HittingTrackerCloud() {
 
   const saveConfig = (url, key) => {
     const newConfig = { url, key };
-    localStorage.setItem('hitting_tracker_config', JSON.stringify(newConfig));
-    supabase.url = url;
-    supabase.key = key;
-    supabase.headers = {
-      'apikey': key,
-      'Authorization': `Bearer ${key}`,
-      'Content-Type': 'application/json',
-      'Prefer': 'return=representation'
-    };
     setConfig(newConfig);
+    setConfigState(newConfig);
   };
 
   const loadData = async () => {
@@ -363,10 +542,11 @@ export default function HittingTrackerCloud() {
     setIsLoading(true);
     setError(null);
 
-    // Try to load from cache first
+    // Load from cache first
     const cache = getLocalCache();
     if (cache.players) setPlayers(cache.players);
     if (cache.sessions) setSessions(cache.sessions);
+    if (cache.sessionPlayers) setSessionPlayers(cache.sessionPlayers);
     if (cache.reps) setReps(cache.reps);
 
     if (!isOnline) {
@@ -375,25 +555,24 @@ export default function HittingTrackerCloud() {
     }
 
     try {
-      const [playersData, sessionsData, repsData] = await Promise.all([
+      const [playersData, sessionsData, sessionPlayersData, repsData] = await Promise.all([
         supabase.getPlayers(),
         supabase.getSessions(),
+        supabase.getSessionPlayers(),
         supabase.getReps()
       ]);
 
       setPlayers(playersData || []);
       setSessions(sessionsData || []);
+      setSessionPlayers(sessionPlayersData || []);
       setReps(repsData || []);
 
-      // Update cache
       setLocalCache({
         players: playersData || [],
         sessions: sessionsData || [],
-        reps: repsData || [],
-        lastUpdated: Date.now()
+        sessionPlayers: sessionPlayersData || [],
+        reps: repsData || []
       });
-
-      setLastSync(new Date());
     } catch (err) {
       console.error('Failed to load data:', err);
       setError('Failed to connect. Check your Supabase settings.');
@@ -406,8 +585,6 @@ export default function HittingTrackerCloud() {
     const queue = getOfflineQueue();
     if (queue.length === 0) return;
 
-    setError(null);
-    
     for (const action of queue) {
       try {
         switch (action.type) {
@@ -418,46 +595,46 @@ export default function HittingTrackerCloud() {
             await supabase.deletePlayer(action.data.id);
             break;
           case 'CREATE_SESSION':
-            const [session] = await supabase.createSession(action.data.playerId);
-            if (session && action.data.reps.length > 0) {
-              const repsToCreate = action.data.reps.map(r => ({
-                session_id: session.id,
-                player_id: action.data.playerId,
-                rep_number: r.repNumber,
-                pitch_location: r.pitchLocation,
-                hard_hit: r.hardHit,
-                launch_angle: r.launchAngle,
-                direction: r.direction,
-                spin: r.spin
-              }));
-              await supabase.createReps(repsToCreate);
+            const [session] = await supabase.createSession(action.data.pitchType);
+            if (session) {
+              for (const playerId of action.data.playerIds) {
+                await supabase.addSessionPlayer(session.id, playerId);
+              }
+              if (action.data.reps.length > 0) {
+                const repsToCreate = action.data.reps.map(r => ({
+                  session_id: session.id,
+                  player_id: r.playerId,
+                  rep_number: r.repNumber,
+                  pitch_location: r.pitchLocation,
+                  hard_hit: r.hardHit,
+                  launch_angle: r.launchAngle,
+                  direction: r.direction,
+                  spin: r.spin,
+                  pitch_type: action.data.pitchType
+                }));
+                await supabase.createReps(repsToCreate);
+              }
             }
             break;
         }
       } catch (err) {
         console.error('Failed to sync action:', action, err);
-        setError('Some data failed to sync. Will retry.');
-        return; // Stop processing, will retry later
+        return;
       }
     }
 
-    // All synced successfully
     clearOfflineQueue();
     setPendingActions([]);
-    await loadData(); // Refresh data
+    await loadData();
   };
 
+  // Player management
   const addPlayer = async () => {
     if (!newPlayerName.trim()) return;
     
     const tempId = `temp_${Date.now()}`;
-    const newPlayer = {
-      id: tempId,
-      name: newPlayerName.trim(),
-      created_at: new Date().toISOString()
-    };
-
-    // Optimistic update
+    const newPlayer = { id: tempId, name: newPlayerName.trim(), created_at: new Date().toISOString() };
+    
     setPlayers([...players, newPlayer]);
     setNewPlayerName('');
     setShowAddPlayer(false);
@@ -465,14 +642,8 @@ export default function HittingTrackerCloud() {
     if (isOnline) {
       try {
         const [created] = await supabase.createPlayer(newPlayerName.trim());
-        // Replace temp with real
         setPlayers(prev => prev.map(p => p.id === tempId ? created : p));
-        // Update cache
-        const cache = getLocalCache();
-        cache.players = players.map(p => p.id === tempId ? created : p);
-        setLocalCache(cache);
       } catch (err) {
-        console.error('Failed to create player:', err);
         addToOfflineQueue({ type: 'CREATE_PLAYER', data: { name: newPlayerName.trim() } });
         setPendingActions(getOfflineQueue());
       }
@@ -485,30 +656,34 @@ export default function HittingTrackerCloud() {
   const deletePlayer = async (playerId) => {
     if (!confirm('Delete this player and all their data?')) return;
 
-    // Optimistic update
     setPlayers(players.filter(p => p.id !== playerId));
-    setSessions(sessions.filter(s => s.player_id !== playerId));
-    setReps(reps.filter(r => r.player_id !== playerId));
 
     if (isOnline && !playerId.startsWith('temp_')) {
       try {
         await supabase.deletePlayer(playerId);
       } catch (err) {
-        console.error('Failed to delete player:', err);
         addToOfflineQueue({ type: 'DELETE_PLAYER', data: { id: playerId } });
         setPendingActions(getOfflineQueue());
       }
-    } else if (!playerId.startsWith('temp_')) {
-      addToOfflineQueue({ type: 'DELETE_PLAYER', data: { id: playerId } });
-      setPendingActions(getOfflineQueue());
     }
   };
 
-  const startSession = (player) => {
-    setCurrentPlayer(player);
+  // Session management
+  const togglePlayerSelection = (playerId) => {
+    setSelectedPlayerIds(prev => 
+      prev.includes(playerId) 
+        ? prev.filter(id => id !== playerId)
+        : [...prev, playerId]
+    );
+  };
+
+  const startSession = () => {
+    if (selectedPlayerIds.length === 0 || !selectedPitchType) return;
+    
+    const tempSessionId = `temp_session_${Date.now()}`;
+    setCurrentSession({ id: tempSessionId, pitch_type: selectedPitchType, date: new Date().toISOString() });
+    setActivePlayerId(selectedPlayerIds[0]);
     setSessionReps([]);
-    setRepCount(1);
-    resetCurrentRep();
     setView('session');
   };
 
@@ -533,61 +708,97 @@ export default function HittingTrackerCloud() {
   const logRep = () => {
     if (!isRepComplete()) return;
     
-    setSessionReps([...sessionReps, { ...currentRep, repNumber: repCount }]);
-    setRepCount(repCount + 1);
+    const newRep = {
+      ...currentRep,
+      playerId: activePlayerId,
+      repNumber: sessionReps.filter(r => r.playerId === activePlayerId).length + 1
+    };
+    
+    setSessionReps([...sessionReps, newRep]);
     resetCurrentRep();
   };
 
-  const endRound = async () => {
+  const getPlayerRepCount = () => {
+    const counts = {};
+    selectedPlayerIds.forEach(id => {
+      counts[id] = sessionReps.filter(r => r.playerId === id).length;
+    });
+    return counts;
+  };
+
+  const endSession = async () => {
     if (sessionReps.length === 0) {
-      setView('players');
+      setView('home');
+      resetSessionState();
       return;
     }
 
     const sessionData = {
-      playerId: currentPlayer.id,
+      pitchType: selectedPitchType,
+      playerIds: selectedPlayerIds,
       reps: sessionReps
     };
 
-    // Create temp session for optimistic update
-    const tempSessionId = `temp_${Date.now()}`;
+    // Create temp session for display
     const tempSession = {
-      id: tempSessionId,
-      player_id: currentPlayer.id,
+      id: currentSession.id,
+      pitch_type: selectedPitchType,
       date: new Date().toISOString()
     };
+
+    const tempSessionPlayers = selectedPlayerIds.map(pid => ({
+      id: `temp_sp_${Date.now()}_${pid}`,
+      session_id: currentSession.id,
+      player_id: pid
+    }));
+
     const tempReps = sessionReps.map((r, i) => ({
       id: `temp_rep_${Date.now()}_${i}`,
-      session_id: tempSessionId,
-      player_id: currentPlayer.id,
+      session_id: currentSession.id,
+      player_id: r.playerId,
       rep_number: r.repNumber,
       pitch_location: r.pitchLocation,
       hard_hit: r.hardHit,
       launch_angle: r.launchAngle,
       direction: r.direction,
-      spin: r.spin
+      spin: r.spin,
+      pitch_type: selectedPitchType,
+      created_at: new Date().toISOString()
     }));
 
-    // Optimistic update
+    // Update local state
     setSessions([tempSession, ...sessions]);
+    setSessionPlayers([...sessionPlayers, ...tempSessionPlayers]);
     setReps([...reps, ...tempReps]);
 
-    if (isOnline && !currentPlayer.id.startsWith('temp_')) {
+    // Show recap
+    setRecapSession(tempSession);
+    setShowRecap(true);
+    setView('home');
+
+    // Sync to server
+    if (isOnline) {
       try {
-        const [session] = await supabase.createSession(currentPlayer.id);
+        const [session] = await supabase.createSession(selectedPitchType);
         if (session) {
-          const repsToCreate = sessionReps.map(r => ({
-            session_id: session.id,
-            player_id: currentPlayer.id,
-            rep_number: r.repNumber,
-            pitch_location: r.pitchLocation,
-            hard_hit: r.hardHit,
-            launch_angle: r.launchAngle,
-            direction: r.direction,
-            spin: r.spin
-          }));
-          await supabase.createReps(repsToCreate);
-          await loadData(); // Refresh to get real IDs
+          for (const playerId of selectedPlayerIds) {
+            await supabase.addSessionPlayer(session.id, playerId);
+          }
+          if (sessionReps.length > 0) {
+            const repsToCreate = sessionReps.map(r => ({
+              session_id: session.id,
+              player_id: r.playerId,
+              rep_number: r.repNumber,
+              pitch_location: r.pitchLocation,
+              hard_hit: r.hardHit,
+              launch_angle: r.launchAngle,
+              direction: r.direction,
+              spin: r.spin,
+              pitch_type: selectedPitchType
+            }));
+            await supabase.createReps(repsToCreate);
+          }
+          await loadData();
         }
       } catch (err) {
         console.error('Failed to save session:', err);
@@ -599,84 +810,86 @@ export default function HittingTrackerCloud() {
       setPendingActions(getOfflineQueue());
     }
 
-    setCurrentPlayer(null);
+    resetSessionState();
+  };
+
+  const resetSessionState = () => {
+    setCurrentSession(null);
+    setActivePlayerId(null);
     setSessionReps([]);
-    setRepCount(1);
+    setSelectedPlayerIds([]);
+    setSelectedPitchType(null);
     resetCurrentRep();
-    setView('players');
+  };
+
+  // Analytics calculations
+  const getFilteredReps = (playerId) => {
+    let filtered = reps.filter(r => r.player_id === playerId);
+    
+    if (analyticsFilters.pitchType) {
+      filtered = filtered.filter(r => r.pitch_type === analyticsFilters.pitchType);
+    }
+    
+    if (analyticsFilters.dateRange !== 'all') {
+      const now = new Date();
+      let cutoff;
+      switch (analyticsFilters.dateRange) {
+        case 'today':
+          cutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          break;
+        case 'week':
+          cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+          break;
+        case 'month':
+          cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+          break;
+      }
+      if (cutoff) {
+        filtered = filtered.filter(r => new Date(r.created_at) >= cutoff);
+      }
+    }
+    
+    return filtered;
   };
 
   const getPlayerStats = (playerId) => {
-    const playerReps = reps.filter(r => r.player_id === playerId);
-    const playerSessions = sessions.filter(s => s.player_id === playerId);
-    
+    const playerReps = getFilteredReps(playerId);
     if (playerReps.length === 0) return null;
 
     const contactReps = playerReps.filter(r => r.launch_angle !== 'miss');
     
-    const stats = {
-      totalReps: playerReps.length,
-      totalSessions: playerSessions.length,
-      hardHitRate: (playerReps.filter(r => r.hard_hit === 'yes').length / playerReps.length * 100).toFixed(1),
-      contactRate: (contactReps.length / playerReps.length * 100).toFixed(1),
-      
-      launchAngle: {
-        flyBall: (playerReps.filter(r => r.launch_angle === 'fly').length / playerReps.length * 100).toFixed(1),
-        lineDrive: (playerReps.filter(r => r.launch_angle === 'line').length / playerReps.length * 100).toFixed(1),
-        groundBall: (playerReps.filter(r => r.launch_angle === 'ground').length / playerReps.length * 100).toFixed(1),
-        miss: (playerReps.filter(r => r.launch_angle === 'miss').length / playerReps.length * 100).toFixed(1),
-      },
-      
-      direction: {
-        pull: (contactReps.filter(r => r.direction === 'pull').length / (contactReps.length || 1) * 100).toFixed(1),
-        middle: (contactReps.filter(r => r.direction === 'middle').length / (contactReps.length || 1) * 100).toFixed(1),
-        oppo: (contactReps.filter(r => r.direction === 'oppo').length / (contactReps.length || 1) * 100).toFixed(1),
-      },
-      
-      spin: {
-        top: (contactReps.filter(r => r.spin === 'top').length / (contactReps.length || 1) * 100).toFixed(1),
-        back: (contactReps.filter(r => r.spin === 'back').length / (contactReps.length || 1) * 100).toFixed(1),
-        side: (contactReps.filter(r => r.spin === 'side').length / (contactReps.length || 1) * 100).toFixed(1),
-      },
-      
-      zones: Array.from({length: 9}, (_, i) => {
-        const zoneReps = playerReps.filter(r => r.pitch_location === i + 1);
-        const zoneContact = zoneReps.filter(r => r.launch_angle !== 'miss');
-        return {
-          zone: i + 1,
-          total: zoneReps.length,
-          hardHitRate: zoneReps.length > 0 
-            ? (zoneReps.filter(r => r.hard_hit === 'yes').length / zoneReps.length * 100).toFixed(1)
-            : '0.0',
-          contactRate: zoneReps.length > 0
-            ? (zoneContact.length / zoneReps.length * 100).toFixed(1)
-            : '0.0'
-        };
-      })
-    };
-
-    return stats;
-  };
-
-  const getRollingStats = (playerId, lastN = 5) => {
-    const playerSessions = sessions
-      .filter(s => s.player_id === playerId)
-      .sort((a, b) => new Date(b.date) - new Date(a.date))
-      .slice(0, lastN);
-    
-    const sessionIds = new Set(playerSessions.map(s => s.id));
-    const recentReps = reps.filter(r => sessionIds.has(r.session_id));
-    
-    if (recentReps.length === 0) return null;
+    // Zone stats for heat map
+    const zones = {};
+    for (let i = 1; i <= 9; i++) {
+      const zoneReps = playerReps.filter(r => r.pitch_location === i);
+      zones[i] = {
+        total: zoneReps.length,
+        hardHitRate: zoneReps.length > 0 
+          ? ((zoneReps.filter(r => r.hard_hit === 'yes').length / zoneReps.length) * 100).toFixed(0)
+          : '0'
+      };
+    }
 
     return {
-      sessions: playerSessions.length,
-      reps: recentReps.length,
-      hardHitRate: (recentReps.filter(r => r.hard_hit === 'yes').length / recentReps.length * 100).toFixed(1),
-      contactRate: (recentReps.filter(r => r.launch_angle !== 'miss').length / recentReps.length * 100).toFixed(1),
+      totalReps: playerReps.length,
+      hardHitRate: ((playerReps.filter(r => r.hard_hit === 'yes').length / playerReps.length) * 100).toFixed(1),
+      contactRate: ((contactReps.length / playerReps.length) * 100).toFixed(1),
+      launchAngle: {
+        flyBall: ((playerReps.filter(r => r.launch_angle === 'fly').length / playerReps.length) * 100).toFixed(1),
+        lineDrive: ((playerReps.filter(r => r.launch_angle === 'line').length / playerReps.length) * 100).toFixed(1),
+        groundBall: ((playerReps.filter(r => r.launch_angle === 'ground').length / playerReps.length) * 100).toFixed(1),
+        miss: ((playerReps.filter(r => r.launch_angle === 'miss').length / playerReps.length) * 100).toFixed(1),
+      },
+      direction: {
+        pull: contactReps.length > 0 ? ((contactReps.filter(r => r.direction === 'pull').length / contactReps.length) * 100).toFixed(1) : '0',
+        middle: contactReps.length > 0 ? ((contactReps.filter(r => r.direction === 'middle').length / contactReps.length) * 100).toFixed(1) : '0',
+        oppo: contactReps.length > 0 ? ((contactReps.filter(r => r.direction === 'oppo').length / contactReps.length) * 100).toFixed(1) : '0',
+      },
+      zones
     };
   };
 
+  // Loading state
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
@@ -688,91 +901,155 @@ export default function HittingTrackerCloud() {
     );
   }
 
-  // Player Selection View
-  if (view === 'players') {
+  // Session Recap Modal
+  const recapSessionPlayers = recapSession 
+    ? sessionPlayers.filter(sp => sp.session_id === recapSession.id)
+    : [];
+
+  // ===========================================
+  // VIEWS
+  // ===========================================
+
+  // HOME VIEW
+  if (view === 'home') {
     return (
-      <div className="min-h-screen bg-gray-900 text-white p-4 sm:p-6">
+      <div className="min-h-screen bg-gray-900 text-white p-4">
         <div className="max-w-2xl mx-auto">
           <div className="flex items-center justify-between mb-2">
             <h1 className="text-2xl font-bold">Hitting Tracker</h1>
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowSettings(true)}
-                className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
-              >
+              <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-gray-800 rounded-lg">
                 <Settings size={20} />
-              </button>
-              <button
-                onClick={() => setView('analytics')}
-                className="flex items-center gap-2 px-4 py-2 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors"
-              >
-                <TrendingUp size={18} />
-                <span className="hidden sm:inline">Analytics</span>
               </button>
             </div>
           </div>
 
           <div className="flex items-center justify-between mb-6">
-            <ConnectionStatus 
-              isOnline={isOnline} 
-              pendingCount={pendingActions.length}
-              onSync={syncOfflineActions}
-            />
-            {lastSync && (
-              <p className="text-xs text-gray-500">
-                Last sync: {lastSync.toLocaleTimeString()}
-              </p>
-            )}
+            <ConnectionStatus isOnline={isOnline} pendingCount={pendingActions.length} onSync={syncOfflineActions} />
           </div>
 
           {error && (
-            <div className="mb-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-sm text-red-200">
-              {error}
-            </div>
+            <div className="mb-4 p-3 bg-red-900/50 border border-red-700 rounded-lg text-sm text-red-200">{error}</div>
           )}
 
+          <div className="grid gap-4 mb-6">
+            <button
+              onClick={() => setView('setup')}
+              disabled={players.length === 0}
+              className={`p-6 rounded-xl flex items-center gap-4 transition-all
+                ${players.length > 0 ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-700 text-gray-500 cursor-not-allowed'}`}
+            >
+              <Play size={32} />
+              <div className="text-left">
+                <p className="text-lg font-semibold">Start Session</p>
+                <p className="text-sm opacity-80">Select players and pitch type</p>
+              </div>
+            </button>
+
+            <button
+              onClick={() => setView('analytics')}
+              className="p-6 bg-gray-800 rounded-xl flex items-center gap-4 hover:bg-gray-750 transition-all"
+            >
+              <TrendingUp size={32} />
+              <div className="text-left">
+                <p className="text-lg font-semibold">Analytics</p>
+                <p className="text-sm text-gray-400">View player stats and trends</p>
+              </div>
+            </button>
+
+            <button
+              onClick={() => setView('players')}
+              className="p-6 bg-gray-800 rounded-xl flex items-center gap-4 hover:bg-gray-750 transition-all"
+            >
+              <Users size={32} />
+              <div className="text-left">
+                <p className="text-lg font-semibold">Manage Players</p>
+                <p className="text-sm text-gray-400">{players.length} players</p>
+              </div>
+            </button>
+          </div>
+
+          {sessions.length > 0 && (
+            <div>
+              <h2 className="text-lg font-medium text-gray-300 mb-3">Recent Sessions</h2>
+              <div className="space-y-2">
+                {sessions.slice(0, 5).map((session) => {
+                  const sp = sessionPlayers.filter(s => s.session_id === session.id);
+                  const sessionPlayerNames = sp.map(s => players.find(p => p.id === s.player_id)?.name).filter(Boolean);
+                  const sessionReps = reps.filter(r => r.session_id === session.id);
+                  
+                  return (
+                    <div key={session.id} className="bg-gray-800 rounded-lg p-3">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <p className="font-medium">{getPitchTypeLabel(session.pitch_type)}</p>
+                          <p className="text-sm text-gray-400">
+                            {sessionPlayerNames.join(', ')} · {sessionReps.length} reps
+                          </p>
+                        </div>
+                        <p className="text-xs text-gray-500">
+                          {new Date(session.date).toLocaleDateString()}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <SettingsModal
+          isOpen={showSettings}
+          onClose={() => setShowSettings(false)}
+          onSave={saveConfig}
+        />
+
+        {showRecap && recapSession && (
+          <SessionRecap
+            session={recapSession}
+            sessionPlayers={recapSessionPlayers}
+            reps={reps}
+            players={players}
+            onClose={() => { setShowRecap(false); setRecapSession(null); }}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // PLAYERS VIEW
+  if (view === 'players') {
+    return (
+      <div className="min-h-screen bg-gray-900 text-white p-4">
+        <div className="max-w-2xl mx-auto">
+          <div className="flex items-center gap-3 mb-6">
+            <button onClick={() => setView('home')} className="p-2 hover:bg-gray-800 rounded-lg">
+              <ArrowLeft size={20} />
+            </button>
+            <h1 className="text-2xl font-bold">Players</h1>
+          </div>
+
           <div className="space-y-3 mb-6">
-            <h2 className="text-lg font-medium text-gray-300">Select Player</h2>
             {players.length === 0 ? (
               <p className="text-gray-500 py-8 text-center">No players yet. Add your first player below.</p>
             ) : (
-              players.map((player) => {
-                const stats = getPlayerStats(player.id);
-                return (
-                  <div
-                    key={player.id}
-                    className="bg-gray-800 rounded-xl p-4 flex items-center justify-between"
-                  >
-                    <button
-                      onClick={() => startSession(player)}
-                      className="flex-1 flex items-center gap-3 text-left"
-                    >
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center ${player.id.startsWith('temp_') ? 'bg-yellow-600' : 'bg-blue-600'}`}>
-                        <User size={20} />
-                      </div>
-                      <div>
-                        <p className="font-medium">{player.name}</p>
-                        {stats ? (
-                          <p className="text-sm text-gray-400">
-                            {stats.totalReps} reps · {stats.hardHitRate}% hard hit · {stats.contactRate}% contact
-                          </p>
-                        ) : (
-                          <p className="text-sm text-gray-500">No sessions yet</p>
-                        )}
-                      </div>
-                    </button>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => deletePlayer(player.id)}
-                        className="p-2 text-gray-500 hover:text-red-400 transition-colors"
-                      >
-                        <Trash2 size={18} />
-                      </button>
-                      <ChevronRight className="text-gray-500" size={20} />
+              players.map((player) => (
+                <div key={player.id} className="bg-gray-800 rounded-xl p-4 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${player.id.toString().startsWith('temp_') ? 'bg-yellow-600' : 'bg-blue-600'}`}>
+                      <User size={20} />
                     </div>
+                    <span className="font-medium">{player.name}</span>
                   </div>
-                );
-              })
+                  <button
+                    onClick={() => deletePlayer(player.id)}
+                    className="p-2 text-gray-500 hover:text-red-400 transition-colors"
+                  >
+                    <Trash2 size={18} />
+                  </button>
+                </div>
+              ))
             )}
           </div>
 
@@ -788,16 +1065,10 @@ export default function HittingTrackerCloud() {
                 onKeyDown={(e) => e.key === 'Enter' && addPlayer()}
               />
               <div className="flex gap-2">
-                <button
-                  onClick={addPlayer}
-                  className="flex-1 py-3 bg-blue-500 rounded-lg font-medium hover:bg-blue-600 transition-colors"
-                >
+                <button onClick={addPlayer} className="flex-1 py-3 bg-blue-500 rounded-lg font-medium hover:bg-blue-600">
                   Add Player
                 </button>
-                <button
-                  onClick={() => { setShowAddPlayer(false); setNewPlayerName(''); }}
-                  className="px-4 py-3 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors"
-                >
+                <button onClick={() => { setShowAddPlayer(false); setNewPlayerName(''); }} className="px-4 py-3 bg-gray-700 rounded-lg hover:bg-gray-600">
                   Cancel
                 </button>
               </div>
@@ -805,52 +1076,101 @@ export default function HittingTrackerCloud() {
           ) : (
             <button
               onClick={() => setShowAddPlayer(true)}
-              className="w-full py-4 bg-gray-800 rounded-xl flex items-center justify-center gap-2 text-gray-300 hover:bg-gray-750 hover:text-white transition-colors border-2 border-dashed border-gray-700"
+              className="w-full py-4 bg-gray-800 rounded-xl flex items-center justify-center gap-2 text-gray-300 hover:text-white border-2 border-dashed border-gray-700"
             >
               <Plus size={20} />
               Add Player
             </button>
           )}
         </div>
-
-        <SettingsModal
-          isOpen={showSettings}
-          onClose={() => setShowSettings(false)}
-          supabaseUrl={config.url}
-          supabaseKey={config.key}
-          onSave={saveConfig}
-        />
       </div>
     );
   }
 
-  // Session/Logging View
-  if (view === 'session') {
+  // SESSION SETUP VIEW
+  if (view === 'setup') {
     return (
-      <div className="min-h-screen bg-gray-900 text-white p-4 sm:p-6">
+      <div className="min-h-screen bg-gray-900 text-white p-4">
         <div className="max-w-2xl mx-auto">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h1 className="text-xl font-bold">{currentPlayer?.name}</h1>
-              <p className="text-gray-400">Rep #{repCount} · {sessionReps.length} logged</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <ConnectionStatus 
-                isOnline={isOnline} 
-                pendingCount={pendingActions.length}
-                onSync={syncOfflineActions}
-              />
-              <button
-                onClick={endRound}
-                className="px-4 py-2 bg-red-600 rounded-lg font-medium hover:bg-red-700 transition-colors"
-              >
-                End Round
-              </button>
-            </div>
+          <div className="flex items-center gap-3 mb-6">
+            <button onClick={() => { setView('home'); resetSessionState(); }} className="p-2 hover:bg-gray-800 rounded-lg">
+              <ArrowLeft size={20} />
+            </button>
+            <h1 className="text-2xl font-bold">Start Session</h1>
           </div>
 
           <div className="space-y-6">
-            {/* Strike Zone */}
+            <div>
+              <h2 className="text-lg font-medium mb-3">Select Pitch Type</h2>
+              <div className="grid grid-cols-2 gap-3">
+                {PITCH_TYPES.map((pt) => (
+                  <button
+                    key={pt.value}
+                    onClick={() => setSelectedPitchType(pt.value)}
+                    className={`p-4 rounded-xl text-left transition-all
+                      ${selectedPitchType === pt.value ? 'bg-blue-600 ring-2 ring-blue-400' : 'bg-gray-800 hover:bg-gray-700'}`}
+                  >
+                    <p className="font-medium">{pt.label}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <h2 className="text-lg font-medium mb-3">Select Players ({selectedPlayerIds.length})</h2>
+              <PlayerSelector
+                players={players}
+                selectedIds={selectedPlayerIds}
+                onToggle={togglePlayerSelection}
+              />
+            </div>
+
+            <button
+              onClick={startSession}
+              disabled={selectedPlayerIds.length === 0 || !selectedPitchType}
+              className={`w-full py-4 rounded-xl font-medium text-lg transition-all
+                ${selectedPlayerIds.length > 0 && selectedPitchType
+                  ? 'bg-green-600 hover:bg-green-700'
+                  : 'bg-gray-700 text-gray-500 cursor-not-allowed'}`}
+            >
+              Start Session
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ACTIVE SESSION VIEW
+  if (view === 'session') {
+    const sessionPlayersData = players.filter(p => selectedPlayerIds.includes(p.id));
+    const repsCount = getPlayerRepCount();
+    const currentPlayerReps = sessionReps.filter(r => r.playerId === activePlayerId);
+
+    return (
+      <div className="min-h-screen bg-gray-900 text-white p-4">
+        <div className="max-w-2xl mx-auto">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <p className="text-sm text-gray-400">{getPitchTypeLabel(selectedPitchType)}</p>
+              <p className="text-lg font-bold">{sessionReps.length} total reps</p>
+            </div>
+            <button
+              onClick={endSession}
+              className="px-4 py-2 bg-red-600 rounded-lg font-medium hover:bg-red-700"
+            >
+              End Session
+            </button>
+          </div>
+
+          <PlayerTabs
+            players={sessionPlayersData}
+            activeId={activePlayerId}
+            onSelect={setActivePlayerId}
+            repsCount={repsCount}
+          />
+
+          <div className="mt-4 space-y-4">
             <div className="bg-gray-800 rounded-xl p-4">
               <label className="text-sm font-medium text-gray-300 mb-3 block">Pitch Location</label>
               <StrikeZone
@@ -859,14 +1179,10 @@ export default function HittingTrackerCloud() {
               />
             </div>
 
-            {/* Quick Toggles */}
             <div className="bg-gray-800 rounded-xl p-4 space-y-4">
               <ToggleGroup
                 label="Hard Hit?"
-                options={[
-                  { value: 'yes', label: 'Yes' },
-                  { value: 'no', label: 'No' }
-                ]}
+                options={[{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]}
                 selected={currentRep.hardHit}
                 onSelect={(val) => setCurrentRep({...currentRep, hardHit: val})}
                 columns={2}
@@ -910,11 +1226,10 @@ export default function HittingTrackerCloud() {
               />
             </div>
 
-            {/* Action Buttons */}
             <div className="flex gap-3">
               <button
                 onClick={resetCurrentRep}
-                className="flex-1 py-4 bg-gray-700 rounded-xl flex items-center justify-center gap-2 hover:bg-gray-600 transition-colors active:scale-95"
+                className="flex-1 py-4 bg-gray-700 rounded-xl flex items-center justify-center gap-2 hover:bg-gray-600 active:scale-95"
               >
                 <RotateCcw size={20} />
                 Reset
@@ -922,31 +1237,28 @@ export default function HittingTrackerCloud() {
               <button
                 onClick={logRep}
                 disabled={!isRepComplete()}
-                className={`flex-1 py-4 rounded-xl flex items-center justify-center gap-2 font-medium transition-all active:scale-95
-                  ${isRepComplete() 
-                    ? 'bg-green-600 hover:bg-green-700' 
-                    : 'bg-gray-700 text-gray-500 cursor-not-allowed'}`}
+                className={`flex-1 py-4 rounded-xl flex items-center justify-center gap-2 font-medium active:scale-95
+                  ${isRepComplete() ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-700 text-gray-500 cursor-not-allowed'}`}
               >
                 <Save size={20} />
-                Log & Next
+                Log Rep
               </button>
             </div>
 
-            {/* Session Summary */}
-            {sessionReps.length > 0 && (
+            {currentPlayerReps.length > 0 && (
               <div className="bg-gray-800 rounded-xl p-4">
-                <h3 className="font-medium mb-2">This Session</h3>
+                <h3 className="font-medium mb-2">{players.find(p => p.id === activePlayerId)?.name} - This Session</h3>
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div>
                     <p className="text-gray-400">Hard Hit Rate</p>
                     <p className="text-xl font-bold">
-                      {(sessionReps.filter(r => r.hardHit === 'yes').length / sessionReps.length * 100).toFixed(0)}%
+                      {((currentPlayerReps.filter(r => r.hardHit === 'yes').length / currentPlayerReps.length) * 100).toFixed(0)}%
                     </p>
                   </div>
                   <div>
                     <p className="text-gray-400">Contact Rate</p>
                     <p className="text-xl font-bold">
-                      {(sessionReps.filter(r => r.launchAngle !== 'miss').length / sessionReps.length * 100).toFixed(0)}%
+                      {((currentPlayerReps.filter(r => r.launchAngle !== 'miss').length / currentPlayerReps.length) * 100).toFixed(0)}%
                     </p>
                   </div>
                 </div>
@@ -958,173 +1270,115 @@ export default function HittingTrackerCloud() {
     );
   }
 
-  // Analytics View
+  // ANALYTICS VIEW
   if (view === 'analytics') {
     const stats = selectedPlayerId ? getPlayerStats(selectedPlayerId) : null;
-    const rolling = selectedPlayerId ? getRollingStats(selectedPlayerId) : null;
 
     return (
-      <div className="min-h-screen bg-gray-900 text-white p-4 sm:p-6">
+      <div className="min-h-screen bg-gray-900 text-white p-4">
         <div className="max-w-2xl mx-auto">
           <div className="flex items-center gap-3 mb-6">
-            <button
-              onClick={() => setView('players')}
-              className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
-            >
+            <button onClick={() => setView('home')} className="p-2 hover:bg-gray-800 rounded-lg">
               <ArrowLeft size={20} />
             </button>
             <h1 className="text-2xl font-bold">Analytics</h1>
           </div>
 
-          {/* Player Selector */}
-          <div className="mb-6">
+          <div className="space-y-4">
             <select
               value={selectedPlayerId || ''}
               onChange={(e) => setSelectedPlayerId(e.target.value || null)}
-              className="w-full px-4 py-3 bg-gray-800 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-4 py-3 bg-gray-800 rounded-lg text-white"
             >
               <option value="">Select a player</option>
               {players.map((player) => (
                 <option key={player.id} value={player.id}>{player.name}</option>
               ))}
             </select>
-          </div>
 
-          {stats ? (
-            <div className="space-y-4">
-              {/* Overview */}
-              <div className="bg-gray-800 rounded-xl p-4">
-                <h3 className="font-medium mb-3">All-Time Stats</h3>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                  <div>
-                    <p className="text-gray-400 text-sm">Sessions</p>
-                    <p className="text-2xl font-bold">{stats.totalSessions}</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-400 text-sm">Total Reps</p>
-                    <p className="text-2xl font-bold">{stats.totalReps}</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-400 text-sm">Hard Hit %</p>
-                    <p className="text-2xl font-bold text-green-400">{stats.hardHitRate}%</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-400 text-sm">Contact %</p>
-                    <p className="text-2xl font-bold text-blue-400">{stats.contactRate}%</p>
-                  </div>
-                </div>
-              </div>
+            {selectedPlayerId && (
+              <AnalyticsFilter
+                filters={analyticsFilters}
+                setFilters={setAnalyticsFilters}
+                pitchTypes={PITCH_TYPES}
+              />
+            )}
 
-              {/* Rolling Average */}
-              {rolling && (
+            {stats ? (
+              <div className="space-y-4">
                 <div className="bg-gray-800 rounded-xl p-4">
-                  <h3 className="font-medium mb-3">Last {rolling.sessions} Sessions</h3>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <p className="text-gray-400 text-sm">Hard Hit %</p>
-                      <p className="text-2xl font-bold text-green-400">{rolling.hardHitRate}%</p>
+                  <h3 className="font-medium mb-3">Overview</h3>
+                  <div className="grid grid-cols-3 gap-4">
+                    <div className="text-center">
+                      <p className="text-2xl font-bold">{stats.totalReps}</p>
+                      <p className="text-xs text-gray-400">Reps</p>
                     </div>
-                    <div>
-                      <p className="text-gray-400 text-sm">Contact %</p>
-                      <p className="text-2xl font-bold text-blue-400">{rolling.contactRate}%</p>
+                    <div className="text-center">
+                      <p className="text-2xl font-bold text-green-400">{stats.hardHitRate}%</p>
+                      <p className="text-xs text-gray-400">Hard Hit</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-2xl font-bold text-blue-400">{stats.contactRate}%</p>
+                      <p className="text-xs text-gray-400">Contact</p>
                     </div>
                   </div>
                 </div>
-              )}
 
-              {/* Launch Angle Distribution */}
-              <div className="bg-gray-800 rounded-xl p-4">
-                <h3 className="font-medium mb-3">Launch Angle</h3>
-                <div className="space-y-2">
-                  {[
-                    { label: 'Fly Ball', value: stats.launchAngle.flyBall, color: 'bg-purple-500' },
-                    { label: 'Line Drive', value: stats.launchAngle.lineDrive, color: 'bg-green-500' },
-                    { label: 'Ground Ball', value: stats.launchAngle.groundBall, color: 'bg-yellow-500' },
-                    { label: 'Miss', value: stats.launchAngle.miss, color: 'bg-red-500' },
-                  ].map((item) => (
-                    <div key={item.label} className="flex items-center gap-3">
-                      <span className="w-24 text-sm text-gray-400">{item.label}</span>
-                      <div className="flex-1 h-6 bg-gray-700 rounded overflow-hidden">
-                        <div 
-                          className={`h-full ${item.color} transition-all`}
-                          style={{ width: `${item.value}%` }}
-                        />
+                <div className="bg-gray-800 rounded-xl p-4">
+                  <h3 className="font-medium mb-3">Hard Hit % by Zone</h3>
+                  <StrikeZone heatMapData={stats.zones} />
+                  <div className="flex justify-center gap-4 mt-3 text-xs">
+                    <div className="flex items-center gap-1"><div className="w-3 h-3 bg-green-600 rounded"></div> 50%+</div>
+                    <div className="flex items-center gap-1"><div className="w-3 h-3 bg-yellow-600 rounded"></div> 35-49%</div>
+                    <div className="flex items-center gap-1"><div className="w-3 h-3 bg-orange-600 rounded"></div> 20-34%</div>
+                    <div className="flex items-center gap-1"><div className="w-3 h-3 bg-red-600 rounded"></div> &lt;20%</div>
+                  </div>
+                </div>
+
+                <div className="bg-gray-800 rounded-xl p-4">
+                  <h3 className="font-medium mb-3">Launch Angle</h3>
+                  <div className="space-y-2">
+                    {[
+                      { label: 'Fly Ball', value: stats.launchAngle.flyBall, color: 'bg-purple-500' },
+                      { label: 'Line Drive', value: stats.launchAngle.lineDrive, color: 'bg-green-500' },
+                      { label: 'Ground Ball', value: stats.launchAngle.groundBall, color: 'bg-yellow-500' },
+                      { label: 'Miss', value: stats.launchAngle.miss, color: 'bg-red-500' },
+                    ].map((item) => (
+                      <div key={item.label} className="flex items-center gap-3">
+                        <span className="w-24 text-sm text-gray-400">{item.label}</span>
+                        <div className="flex-1 h-6 bg-gray-700 rounded overflow-hidden">
+                          <div className={`h-full ${item.color}`} style={{ width: `${item.value}%` }} />
+                        </div>
+                        <span className="w-12 text-sm text-right">{item.value}%</span>
                       </div>
-                      <span className="w-12 text-sm text-right">{item.value}%</span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="bg-gray-800 rounded-xl p-4">
+                  <h3 className="font-medium mb-3">Direction (on contact)</h3>
+                  <div className="grid grid-cols-3 gap-4 text-center">
+                    <div>
+                      <p className="text-xl font-bold">{stats.direction.pull}%</p>
+                      <p className="text-xs text-gray-400">Pull</p>
                     </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Direction Distribution */}
-              <div className="bg-gray-800 rounded-xl p-4">
-                <h3 className="font-medium mb-3">Direction (on contact)</h3>
-                <div className="grid grid-cols-3 gap-4 text-center">
-                  <div>
-                    <p className="text-gray-400 text-sm">Pull</p>
-                    <p className="text-xl font-bold">{stats.direction.pull}%</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-400 text-sm">Middle</p>
-                    <p className="text-xl font-bold">{stats.direction.middle}%</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-400 text-sm">Oppo</p>
-                    <p className="text-xl font-bold">{stats.direction.oppo}%</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Spin Distribution */}
-              <div className="bg-gray-800 rounded-xl p-4">
-                <h3 className="font-medium mb-3">Spin (on contact)</h3>
-                <div className="grid grid-cols-3 gap-4 text-center">
-                  <div>
-                    <p className="text-gray-400 text-sm">Top</p>
-                    <p className="text-xl font-bold">{stats.spin.top}%</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-400 text-sm">Back</p>
-                    <p className="text-xl font-bold">{stats.spin.back}%</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-400 text-sm">Side/Flare</p>
-                    <p className="text-xl font-bold">{stats.spin.side}%</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Zone Breakdown */}
-              <div className="bg-gray-800 rounded-xl p-4">
-                <h3 className="font-medium mb-3">Zone Performance</h3>
-                <div className="grid grid-cols-3 gap-1">
-                  {stats.zones.map((zone) => (
-                    <div 
-                      key={zone.zone}
-                      className={`p-3 rounded text-center ${zone.total > 0 ? 'bg-gray-700' : 'bg-gray-800'}`}
-                    >
-                      <p className="text-xs text-gray-400">Zone {zone.zone}</p>
-                      {zone.total > 0 ? (
-                        <>
-                          <p className="font-bold text-green-400">{zone.hardHitRate}%</p>
-                          <p className="text-xs text-gray-500">{zone.total} reps</p>
-                        </>
-                      ) : (
-                        <p className="text-gray-600 text-sm">—</p>
-                      )}
+                    <div>
+                      <p className="text-xl font-bold">{stats.direction.middle}%</p>
+                      <p className="text-xs text-gray-400">Middle</p>
                     </div>
-                  ))}
+                    <div>
+                      <p className="text-xl font-bold">{stats.direction.oppo}%</p>
+                      <p className="text-xs text-gray-400">Oppo</p>
+                    </div>
+                  </div>
                 </div>
-                <p className="text-xs text-gray-500 mt-2 text-center">Hard Hit % by zone</p>
               </div>
-            </div>
-          ) : (
-            <div className="bg-gray-800 rounded-xl p-8 text-center text-gray-500">
-              {players.length === 0 
-                ? 'Add players to see analytics'
-                : 'Select a player to view their stats'}
-            </div>
-          )}
+            ) : (
+              <div className="bg-gray-800 rounded-xl p-8 text-center text-gray-500">
+                Select a player to view their stats
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
