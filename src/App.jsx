@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, User, TrendingUp, ChevronRight, RotateCcw, Save, ArrowLeft, Trash2, Wifi, WifiOff, RefreshCw, Settings, X, Users, Play, Check, Filter, Calendar, TrendingDown, Minus } from 'lucide-react';
+import { Plus, User, TrendingUp, ChevronRight, RotateCcw, Save, ArrowLeft, Trash2, Wifi, WifiOff, RefreshCw, Settings, X, Users, Play, Check, Filter, Calendar, TrendingDown, Minus, CheckCircle, AlertCircle } from 'lucide-react';
 
 // ===========================================
 // CONFIGURATION
@@ -222,20 +222,47 @@ const ToggleGroup = ({ label, options, selected, onSelect, columns = 2 }) => (
 );
 
 // Connection Status
-const ConnectionStatus = ({ isOnline, pendingCount, onSync }) => (
-  <div className="flex items-center gap-2">
+const ConnectionStatus = ({ isOnline, pendingCount, onSync, isSyncing }) => (
+  <div className="flex items-center gap-3">
     {pendingCount > 0 && (
-      <button onClick={onSync} className="flex items-center gap-1 px-2 py-1 bg-yellow-600 rounded text-xs">
-        <RefreshCw size={12} />
-        {pendingCount} pending
+      <button 
+        onClick={onSync} 
+        disabled={isSyncing}
+        className="flex items-center gap-2 px-4 py-3 bg-yellow-600 hover:bg-yellow-700 active:bg-yellow-800 rounded-lg text-sm font-medium min-h-[44px] min-w-[44px] touch-manipulation"
+      >
+        <RefreshCw size={18} className={isSyncing ? 'animate-spin' : ''} />
+        {isSyncing ? 'Syncing...' : `${pendingCount} pending`}
       </button>
     )}
-    <div className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${isOnline ? 'bg-green-800 text-green-200' : 'bg-red-800 text-red-200'}`}>
-      {isOnline ? <Wifi size={12} /> : <WifiOff size={12} />}
+    <div className={`flex items-center gap-1 px-3 py-2 rounded-lg text-sm ${isOnline ? 'bg-green-800 text-green-200' : 'bg-red-800 text-red-200'}`}>
+      {isOnline ? <Wifi size={16} /> : <WifiOff size={16} />}
       {isOnline ? 'Online' : 'Offline'}
     </div>
   </div>
 );
+
+// Toast Notification
+const Toast = ({ message, type, onClose }) => {
+  useEffect(() => {
+    const timer = setTimeout(onClose, type === 'success' ? 5000 : 6000);
+    return () => clearTimeout(timer);
+  }, [onClose, type]);
+
+  if (!message) return null;
+
+  const bgColor = type === 'success' ? 'bg-green-600' : type === 'error' ? 'bg-red-600' : 'bg-yellow-600';
+  const Icon = type === 'success' ? CheckCircle : type === 'error' ? AlertCircle : RefreshCw;
+
+  return (
+    <div className={`fixed bottom-24 left-4 right-4 ${bgColor} text-white px-5 py-4 rounded-xl shadow-2xl flex items-center gap-4 z-50`}>
+      <Icon size={28} className={type === 'warning' ? 'animate-spin' : ''} />
+      <span className="flex-1 text-base font-medium">{message}</span>
+      <button onClick={onClose} className="p-2 hover:bg-white/20 rounded-lg">
+        <X size={22} />
+      </button>
+    </div>
+  );
+};
 
 // Settings Modal
 const SettingsModal = ({ isOpen, onClose, onSave }) => {
@@ -615,7 +642,9 @@ export default function HittingTrackerV2() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [pendingActions, setPendingActions] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [error, setError] = useState(null);
+  const [toast, setToast] = useState({ message: '', type: '' });
 
   // Data state
   const [players, setPlayers] = useState([]);
@@ -660,7 +689,15 @@ export default function HittingTrackerV2() {
 
   // Online/offline detection
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
+    const handleOnline = () => {
+      setIsOnline(true);
+      // Auto-sync when coming back online
+      const queue = getOfflineQueue();
+      if (queue.length > 0) {
+        console.log('Back online, auto-syncing pending data...');
+        syncOfflineActions();
+      }
+    };
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -680,12 +717,13 @@ export default function HittingTrackerV2() {
     loadData();
   }, [config]);
 
-  // Auto-sync when coming online
+  // Auto-sync on app load if online and has pending data
   useEffect(() => {
-    if (isOnline && pendingActions.length > 0) {
+    if (isOnline && pendingActions.length > 0 && config.url && config.key) {
+      console.log('App loaded with pending data, auto-syncing...');
       syncOfflineActions();
     }
-  }, [isOnline]);
+  }, [config]); // Trigger after config loads
 
   const saveConfig = (url, key) => {
     const newConfig = { url, key };
@@ -745,48 +783,84 @@ export default function HittingTrackerV2() {
   const syncOfflineActions = async () => {
     const queue = getOfflineQueue();
     if (queue.length === 0) return;
+    
+    if (isSyncing) return; // Prevent double-clicks
+    setIsSyncing(true);
+    setError(null);
 
-    for (const action of queue) {
-      try {
-        switch (action.type) {
-          case 'CREATE_PLAYER':
-            await supabase.createPlayer(action.data.name);
-            break;
-          case 'DELETE_PLAYER':
-            await supabase.deletePlayer(action.data.id);
-            break;
-          case 'CREATE_SESSION':
-            const [session] = await supabase.createSession(action.data.pitchType);
-            if (session) {
-              for (const playerId of action.data.playerIds) {
-                await supabase.addSessionPlayer(session.id, playerId);
-              }
-              if (action.data.reps.length > 0) {
-                const repsToCreate = action.data.reps.map(r => ({
-                  session_id: session.id,
-                  player_id: r.playerId,
-                  rep_number: r.repNumber,
-                  pitch_location: r.pitchLocation,
-                  hard_hit: r.hardHit,
-                  launch_angle: r.launchAngle,
-                  direction: r.direction,
-                  spin: r.spin,
-                  pitch_type: action.data.pitchType
-                }));
-                await supabase.createReps(repsToCreate);
-              }
-            }
-            break;
-        }
-      } catch (err) {
-        console.error('Failed to sync action:', action, err);
-        return;
+    // Count total reps to sync
+    const totalReps = queue.reduce((sum, action) => {
+      if (action.type === 'CREATE_SESSION') {
+        return sum + (action.data.reps?.length || 0);
       }
-    }
+      return sum;
+    }, 0);
+    
+    setToast({ message: `Syncing ${queue.length} item${queue.length > 1 ? 's' : ''}${totalReps > 0 ? ` (${totalReps} reps)` : ''}...`, type: 'warning' });
 
-    clearOfflineQueue();
-    setPendingActions([]);
-    await loadData();
+    try {
+      let syncedReps = 0;
+      
+      for (const action of queue) {
+        try {
+          switch (action.type) {
+            case 'CREATE_PLAYER':
+              await supabase.createPlayer(action.data.name);
+              break;
+            case 'DELETE_PLAYER':
+              await supabase.deletePlayer(action.data.id);
+              break;
+            case 'CREATE_SESSION':
+              const [session] = await supabase.createSession(action.data.pitchType);
+              if (session) {
+                for (const playerId of action.data.playerIds) {
+                  await supabase.addSessionPlayer(session.id, playerId);
+                }
+                if (action.data.reps.length > 0) {
+                  const repsToCreate = action.data.reps.map(r => ({
+                    session_id: session.id,
+                    player_id: r.playerId,
+                    rep_number: r.repNumber,
+                    pitch_location: r.pitchLocation,
+                    hard_hit: r.hardHit,
+                    launch_angle: r.launchAngle,
+                    direction: r.direction,
+                    spin: r.spin,
+                    pitch_type: action.data.pitchType
+                  }));
+                  await supabase.createReps(repsToCreate);
+                  syncedReps += action.data.reps.length;
+                }
+              }
+              break;
+          }
+        } catch (err) {
+          console.error('Failed to sync action:', action, err);
+          setError(`Sync failed: ${err.message}. Check your connection and try again.`);
+          setToast({ message: `❌ Sync failed: ${err.message}`, type: 'error' });
+          setIsSyncing(false);
+          return;
+        }
+      }
+
+      clearOfflineQueue();
+      setPendingActions([]);
+      await loadData();
+      setError(null);
+      
+      // Success message with details
+      const successMsg = syncedReps > 0 
+        ? `✅ Sync complete! ${syncedReps} rep${syncedReps > 1 ? 's' : ''} uploaded to database.`
+        : `✅ Sync complete! All changes saved to database.`;
+      setToast({ message: successMsg, type: 'success' });
+      
+    } catch (err) {
+      console.error('Sync error:', err);
+      setError(`Sync failed: ${err.message}`);
+      setToast({ message: `❌ Sync failed: ${err.message}`, type: 'error' });
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   // Player management
@@ -800,32 +874,66 @@ export default function HittingTrackerV2() {
     setNewPlayerName('');
     setShowAddPlayer(false);
 
+    // Save to local cache
+    const newPlayers = [...players, newPlayer];
+    setLocalCache({
+      players: newPlayers,
+      sessions,
+      sessionPlayers,
+      reps
+    });
+
+    // Add to queue and try to sync
+    addToOfflineQueue({ type: 'CREATE_PLAYER', data: { name: newPlayerName.trim(), tempId } });
+    setPendingActions(getOfflineQueue());
+
     if (isOnline) {
       try {
         const [created] = await supabase.createPlayer(newPlayerName.trim());
+        const updatedPlayers = players.map(p => p.id === tempId ? created : p);
+        updatedPlayers.push(created);
         setPlayers(prev => prev.map(p => p.id === tempId ? created : p));
+        // Remove from queue since it synced
+        const queue = getOfflineQueue().filter(a => !(a.type === 'CREATE_PLAYER' && a.data.tempId === tempId));
+        localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(queue));
+        setPendingActions(queue);
+        // Update cache with server data
+        await loadData();
       } catch (err) {
-        addToOfflineQueue({ type: 'CREATE_PLAYER', data: { name: newPlayerName.trim() } });
-        setPendingActions(getOfflineQueue());
+        console.error('Failed to sync player:', err);
+        setToast({ message: `Player saved locally. Will sync when connected.`, type: 'warning' });
       }
     } else {
-      addToOfflineQueue({ type: 'CREATE_PLAYER', data: { name: newPlayerName.trim() } });
-      setPendingActions(getOfflineQueue());
+      setToast({ message: `Player saved locally. Will sync when online.`, type: 'warning' });
     }
   };
 
   const deletePlayer = async (playerId) => {
     if (!confirm('Delete this player and all their data?')) return;
 
-    setPlayers(players.filter(p => p.id !== playerId));
+    const newPlayers = players.filter(p => p.id !== playerId);
+    setPlayers(newPlayers);
+
+    // Save to local cache
+    setLocalCache({
+      players: newPlayers,
+      sessions,
+      sessionPlayers,
+      reps
+    });
 
     if (isOnline && !playerId.startsWith('temp_')) {
       try {
         await supabase.deletePlayer(playerId);
+        await loadData();
       } catch (err) {
         addToOfflineQueue({ type: 'DELETE_PLAYER', data: { id: playerId } });
         setPendingActions(getOfflineQueue());
+        setToast({ message: `Delete saved locally. Will sync when connected.`, type: 'warning' });
       }
+    } else if (!playerId.startsWith('temp_')) {
+      addToOfflineQueue({ type: 'DELETE_PLAYER', data: { id: playerId } });
+      setPendingActions(getOfflineQueue());
     }
   };
 
@@ -926,14 +1034,32 @@ export default function HittingTrackerV2() {
       created_at: new Date().toISOString()
     }));
 
-    setSessions([tempSession, ...sessions]);
-    setSessionPlayers([...sessionPlayers, ...tempSessionPlayers]);
-    setReps([...reps, ...tempReps]);
+    // Update state
+    const newSessions = [tempSession, ...sessions];
+    const newSessionPlayers = [...sessionPlayers, ...tempSessionPlayers];
+    const newReps = [...reps, ...tempReps];
+    
+    setSessions(newSessions);
+    setSessionPlayers(newSessionPlayers);
+    setReps(newReps);
+
+    // ALWAYS save to local cache first (this is the key fix!)
+    setLocalCache({
+      players,
+      sessions: newSessions,
+      sessionPlayers: newSessionPlayers,
+      reps: newReps
+    });
+
+    // Add to offline queue for syncing
+    addToOfflineQueue({ type: 'CREATE_SESSION', data: sessionData });
+    setPendingActions(getOfflineQueue());
 
     setRecapSession(tempSession);
     setShowRecap(true);
     setView('home');
 
+    // Try to sync immediately if online
     if (isOnline) {
       try {
         const [session] = await supabase.createSession(selectedPitchType);
@@ -955,16 +1081,18 @@ export default function HittingTrackerV2() {
             }));
             await supabase.createReps(repsToCreate);
           }
+          // Sync successful - clear this item from queue and reload fresh data
+          clearOfflineQueue();
+          setPendingActions([]);
           await loadData();
+          setToast({ message: `✅ Session saved! ${sessionReps.length} rep${sessionReps.length > 1 ? 's' : ''} uploaded to database.`, type: 'success' });
         }
       } catch (err) {
-        console.error('Failed to save session:', err);
-        addToOfflineQueue({ type: 'CREATE_SESSION', data: sessionData });
-        setPendingActions(getOfflineQueue());
+        console.error('Failed to sync session:', err);
+        setToast({ message: `💾 Saved locally (${sessionReps.length} reps). Tap "pending" to sync when online.`, type: 'warning' });
       }
     } else {
-      addToOfflineQueue({ type: 'CREATE_SESSION', data: sessionData });
-      setPendingActions(getOfflineQueue());
+      setToast({ message: `💾 Saved locally (${sessionReps.length} reps). Will auto-sync when online.`, type: 'warning' });
     }
 
     resetSessionState();
@@ -1181,7 +1309,7 @@ export default function HittingTrackerV2() {
           </div>
 
           <div className="flex items-center justify-between mb-6">
-            <ConnectionStatus isOnline={isOnline} pendingCount={pendingActions.length} onSync={syncOfflineActions} />
+            <ConnectionStatus isOnline={isOnline} pendingCount={pendingActions.length} onSync={syncOfflineActions} isSyncing={isSyncing} />
           </div>
 
           {error && (
@@ -1270,6 +1398,12 @@ export default function HittingTrackerV2() {
             onClose={() => { setShowRecap(false); setRecapSession(null); }}
           />
         )}
+
+        <Toast 
+          message={toast.message} 
+          type={toast.type} 
+          onClose={() => setToast({ message: '', type: '' })} 
+        />
       </div>
     );
   }
@@ -1528,6 +1662,11 @@ export default function HittingTrackerV2() {
             )}
           </div>
         </div>
+        <Toast 
+          message={toast.message} 
+          type={toast.type} 
+          onClose={() => setToast({ message: '', type: '' })} 
+        />
       </div>
     );
   }
